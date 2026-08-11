@@ -1,0 +1,10 @@
+{
+  "name": "com.tonec.idm",
+  "description": "IDM Native Messaging Host Twin Engine",
+  "path": "C:\\Users\\kingm\\OneDrive\\Desktop\\Downloader\\bridge\\nativeHost.bat",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://ngpampapphipflibhmlchebfeomfdobi/",
+    "chrome-extension://gkfhocelhgmficgbaliccogmgopppgjc/"
+  ]
+}

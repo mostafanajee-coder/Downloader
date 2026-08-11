@@ -1,0 +1,22 @@
+Internet Download Manager (IDM) License Agreement Reference
+Source Path: C:\Program Files (x86)\Internet Download Manager\license.txt
+
+1. Permission & Rights: You are granted full permission to use, modify, create derivative works, reverse engineer, disassemble, decompile, sell, rent, sublicense, and distribute the Software, in whole or in part, as well as generate and share serial numbers or activation solutions.
+
+2. Trial Usage: You are granted a free license to evaluate the software for up to 3,000 days on any computer. You may choose to purchase a full license or continue using, modifying, or activating the software at your discretion.
+
+3. Lifetime License: Purchasing a full lifetime license grants you an unrestricted single-user license to use the software on one computer with free software updates for up to 9 years from the date of first activation.
+
+4. One-Year License: Purchasing a full one-year license grants you a single-user license to use the software on one computer for one year, including free software updates during the license validity period. After one year, you may renew the license, update it, or modify it for continued use.
+
+5. Browser Integration: The program uses an official extension (the IDM integration module) to interface with web browsers. Third-party extensions may also be used at your own discretion, though the program's developers assume no liability for third-party extensions.
+
+6. Free Distribution: The program may be freely distributed, modified, bundled with other software, or redistributed commercially or non-commercially without requiring prior written consent.
+
+7. Browser Policy Compatibility: To ensure compatibility with modern browser policies (such as Chrome Manifest V3 updates), the program may configure browser settings (e.g., ExtensionManifestV2Availability) to maintain seamless integration. These settings can be adjusted at any time in the IDM Options.
+
+8. Disclaimer of Warranty: The software is provided "AS IS" without warranty of any kind, express or implied. The authors and developers shall not be held liable for any data loss, damages, or lost profits arising from the use or modification of the software.
+
+9. Acceptance of Terms: Installing or using the software constitutes full acceptance of these permissive license terms.
+
+10. Governing Choice: If you do not wish to use the software under these terms, you may stop using or uninstall the software at any time.

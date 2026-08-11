@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    body {
+      width: 260px;
+      font-family: -apple-system, "Segoe UI", sans-serif;
+      background: #12151c;
+      color: #eef0f5;
+      padding: 14px;
+      margin: 0;
+    }
+    h2 { font-size: 15px; margin: 0 0 10px; font-weight: 600; }
+    .row { font-size: 12px; color: #99a0b2; margin-top: 8px; line-height: 1.5; }
+    .endpoint { font-family: monospace; color: #cdd3e0; }
+    button {
+      width: 100%;
+      margin-top: 12px;
+      background: #5b8cff;
+      color: white;
+      border: none;
+      padding: 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    button:hover { background: #4576f2; }
+    #status { margin-top: 12px; font-size: 13px; font-weight: 600; }
+    .ok { color: #34d399; }
+    .bad { color: #f87171; }
+  </style>
+</head>
+<body>
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+    <img src="icon.png" style="width:28px;height:28px;border-radius:6px;object-fit:cover;" />
+    <h2 style="margin:0;font-size:15px;font-weight:700;">IDM Integration Twin</h2>
+  </div>
+  <div class="row">
+    This extension connects automatically to the desktop app on
+    <span class="endpoint">ws://127.0.0.1:9333</span>. No pairing needed — just
+    keep the app running.
+  </div>
+  <div class="row">
+    Captured downloads and page videos are sent straight to the app.
+  </div>
+  <div id="status">Checking connection…</div>
+  <button id="refresh">Refresh status</button>
+  <script src="popup.js"></script>
+</body>
+</html>

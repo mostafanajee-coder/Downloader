@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Internet Download Manager 6.43</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="idm-theme">
+  <!-- Top Menu Bar matching IDM 6.43 -->
+  <div class="idm-menubar">
+    <div class="menu-item-wrap">
+      <div class="menu-item" id="menu-tasks">Tasks</div>
+      <div class="idm-dropdown hidden" id="dropdown-tasks">
+        <div class="dd-item" id="dd-add-url"><span class="dd-title">Add new download...</span><span class="dd-hotkey">Ctrl+N</span></div>
+        <div class="dd-item" id="dd-add-clipboard"><span class="dd-title">Add download from clipboard</span><span class="dd-hotkey">Ctrl+V</span></div>
+        <div class="dd-item" id="dd-run-grabber"><span class="dd-title">Run Site Grabber...</span></div>
+        <div class="dd-sep"></div>
+        <div class="dd-item" id="dd-export"><span class="dd-title">Export download list...</span></div>
+        <div class="dd-item" id="dd-import"><span class="dd-title">Import download list...</span></div>
+        <div class="dd-sep"></div>
+        <div class="dd-item" id="dd-exit"><span class="dd-title">Exit</span><span class="dd-hotkey">Alt+F4</span></div>
+      </div>
+    </div>
+
+    <div class="menu-item-wrap">
+      <div class="menu-item" id="menu-file">File</div>
+      <div class="idm-dropdown hidden" id="dropdown-file">
+        <div class="dd-item" id="dd-stop-sel"><span class="dd-title">Stop download</span></div>
+        <div class="dd-item" id="dd-resume-sel"><span class="dd-title">Resume download</span></div>
+        <div class="dd-item" id="dd-refresh-url"><span class="dd-title">Refresh download address...</span></div>
+        <div class="dd-item" id="dd-redownload"><span class="dd-title">Redownload</span></div>
+        <div class="dd-sep"></div>
+        <div class="dd-item" id="dd-delete"><span class="dd-title">Delete</span><span class="dd-hotkey">Del</span></div>
+        <div class="dd-item" id="dd-delete-disk"><span class="dd-title">Delete file from disk</span><span class="dd-hotkey">Shift+Del</span></div>
+        <div class="dd-item" id="dd-delete-done"><span class="dd-title">Delete completed</span></div>
+        <div class="dd-sep"></div>
+        <div class="dd-item" id="dd-properties"><span class="dd-title">Properties</span><span class="dd-hotkey">Alt+Enter</span></div>
+      </div>
+    </div>
+
+    <div class="menu-item-wrap">
+      <div class="menu-item" id="menu-downloads">Downloads</div>
+      <div class="idm-dropdown hidden" id="dropdown-downloads">
+        <div class="dd-item" id="dd-pause-all"><span class="dd-title">Pause all downloads</span></div>
+        <div class="dd-item" id="dd-resume-all"><span class="dd-title">Resume all downloads</span></div>
+        <div class="dd-sep"></div>
+        <div class="dd-item" id="dd-speed-limiter"><span class="dd-title">Speed Limiter...</span></div>
+        <div class="dd-item" id="dd-scheduler"><span class="dd-title">Scheduler...</span></div>
+        <div class="dd-item" id="dd-start-queue"><span class="dd-title">Start Queue</span></div>
+      </div>
+    </div>
+
+    <div class="menu-item-wrap">
+      <div class="menu-item" id="menu-view">View</div>
+      <div class="idm-dropdown hidden" id="dropdown-view">
+        <div class="dd-item" id="dd-toggle-sidebar"><span class="dd-title">Categories Tree</span></div>
+        <div class="dd-item" id="dd-toggle-statusbar"><span class="dd-title">Status bar</span></div>
+      </div>
+    </div>
+
+    <div class="menu-item-wrap">
+      <div class="menu-item" id="menu-help">Help</div>
+      <div class="idm-dropdown hidden" id="dropdown-help">
+        <div class="dd-item" id="dd-help-guide"><span class="dd-title">Quick Start Guide</span></div>
+        <div class="dd-item" id="dd-help-update"><span class="dd-title">Check for updates...</span></div>
+        <div class="dd-sep"></div>
+        <div class="dd-item" id="dd-about"><span class="dd-title">About IDM...</span></div>
+      </div>
+    </div>
+
+    <div class="menu-item-wrap">
+      <div class="menu-item" id="menu-registration">Registration</div>
+      <div class="idm-dropdown hidden" id="dropdown-registration">
+        <div class="dd-item" id="dd-reg-info"><span class="dd-title">Registration Info</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Action Toolbar Matching Classic IDM 6.43 -->
+  <div class="idm-toolbar">
+    <button id="add-url-btn" class="idm-tool-btn">
+      <span class="tool-icon add-url-icon"></span>
+      <span class="tool-label">Add URL</span>
+    </button>
+    <button id="resume-all-btn" class="idm-tool-btn">
+      <span class="tool-icon resume-icon"></span>
+      <span class="tool-label">Resume</span>
+    </button>
+    <button id="pause-all-btn" class="idm-tool-btn">
+      <span class="tool-icon stop-icon"></span>
+      <span class="tool-label">Stop</span>
+    </button>
+    <button id="stop-all-btn" class="idm-tool-btn">
+      <span class="tool-icon stopall-icon"></span>
+      <span class="tool-label">Stop All</span>
+    </button>
+    <div class="idm-tool-sep"></div>
+    <button id="delete-btn" class="idm-tool-btn">
+      <span class="tool-icon delete-icon"></span>
+      <span class="tool-label">Delete</span>
+    </button>
+    <button id="clear-done-btn" class="idm-tool-btn">
+      <span class="tool-icon del-done-icon"></span>
+      <span class="tool-label">Delete C...</span>
+    </button>
+    <div class="idm-tool-sep"></div>
+    <button id="options-btn" class="idm-tool-btn">
+      <span class="tool-icon options-icon"></span>
+      <span class="tool-label">Options</span>
+    </button>
+    <button id="scheduler-btn" class="idm-tool-btn">
+      <span class="tool-icon schedule-icon"></span>
+      <span class="tool-label">Scheduler</span>
+    </button>
+    <button id="start-queue-btn" class="idm-tool-btn">
+      <span class="tool-icon queue-icon"></span>
+      <span class="tool-label">Start Qu...</span>
+    </button>
+    <button id="stop-queue-btn" class="idm-tool-btn">
+      <span class="tool-icon stop-queue-icon"></span>
+      <span class="tool-label">Stop Qu...</span>
+    </button>
+    <div class="idm-tool-sep"></div>
+    <button id="tell-friend-btn" class="idm-tool-btn">
+      <span class="tool-icon friend-icon"></span>
+      <span class="tool-label">Tell a Frie...</span>
+    </button>
+  </div>
+
+  <!-- Main Body with Sidebar Tree & Win32 Grid Table -->
+  <div class="idm-body">
+    <!-- Left Tree Sidebar -->
+    <aside class="idm-sidebar" id="main-sidebar">
+      <div class="tree-header">Categories</div>
+      <ul class="idm-tree">
+        <li class="tree-node active" data-cat="all">
+          <span class="tree-icon icon-all"></span>
+          <span class="tree-title">All Downloads</span>
+        </li>
+        <ul>
+          <li class="tree-node" data-cat="compressed">
+            <span class="tree-icon icon-compressed"></span>
+            <span class="tree-title">Compressed</span>
+          </li>
+          <li class="tree-node" data-cat="documents">
+            <span class="tree-icon icon-documents"></span>
+            <span class="tree-title">Documents</span>
+          </li>
+          <li class="tree-node" data-cat="music">
+            <span class="tree-icon icon-music"></span>
+            <span class="tree-title">Music</span>
+          </li>
+          <li class="tree-node" data-cat="programs">
+            <span class="tree-icon icon-programs"></span>
+            <span class="tree-title">Programs</span>
+          </li>
+          <li class="tree-node" data-cat="video">
+            <span class="tree-icon icon-video"></span>
+            <span class="tree-title">Video</span>
+          </li>
+        </ul>
+        <li class="tree-node" data-cat="grabber">
+          <span class="tree-icon icon-grabber"></span>
+          <span class="tree-title">Grabber projects</span>
+        </li>
+        <li class="tree-node" data-cat="queues">
+          <span class="tree-icon icon-queues"></span>
+          <span class="tree-title">Queues</span>
+        </li>
+        <li class="tree-node" data-cat="unfinished">
+          <span class="tree-icon icon-unfinished"></span>
+          <span class="tree-title">Unfinished</span>
+        </li>
+        <li class="tree-node" data-cat="finished">
+          <span class="tree-icon icon-finished"></span>
+          <span class="tree-title">Finished</span>
+        </li>
+      </ul>
+    </aside>
+
+    <!-- Right Table Area with Classic Win32 Columns -->
+    <div class="idm-content">
+      <div class="table-wrap">
+        <table class="idm-table">
+          <thead>
+            <tr>
+              <th class="col-name">File Name</th>
+              <th class="col-q">Q</th>
+              <th class="col-size">Size</th>
+              <th class="col-status">Status</th>
+              <th class="col-eta">Time left</th>
+              <th class="col-speed">Transfer rate</th>
+              <th class="col-date">Last try date</th>
+              <th style="width: 120px;">Description</th>
+            </tr>
+          </thead>
+          <tbody id="queue-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Status Bar -->
+  <div class="idm-statusbar" id="main-statusbar">
+    <div class="status-left">
+      <span id="status-active">0 active downloads</span>
+      <span class="status-sep">|</span>
+      <span id="status-speed">Total speed: 0 B/s</span>
+    </div>
+    <div class="status-right">
+      <span id="status-total">0 items</span>
+    </div>
+  </div>
+
+  <!-- Right-Click Context Menu -->
+  <div id="idm-context-menu" class="idm-context-menu hidden">
+    <div class="ctx-item" id="ctx-open">Open</div>
+    <div class="ctx-item" id="ctx-open-folder">Open Folder</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" id="ctx-resume">Resume Download</div>
+    <div class="ctx-item" id="ctx-pause">Stop Download</div>
+    <div class="ctx-item" id="ctx-refresh-url" style="font-weight: bold; color: #60a5fa;">Refresh Download Address</div>
+    <div class="ctx-item" id="ctx-redownload">Redownload</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" id="ctx-delete">Delete</div>
+    <div class="ctx-item" id="ctx-delete-disk">Delete from Disk</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" id="ctx-properties">Properties...</div>
+  </div>
+
+  <!-- Add URL Modal -->
+  <div id="add-url-modal" class="idm-modal hidden">
+    <div class="idm-dialog" style="width: 500px;">
+      <div class="dialog-header">
+        <span>Enter new address to download</span>
+        <button id="add-modal-close" class="dialog-close">&times;</button>
+      </div>
+      <div class="dialog-body">
+        <label style="display:block; margin-bottom:4px;">Address (URL):</label>
+        <input id="url-input" type="text" placeholder="https://example.com/file.zip or video link" style="width:100%; padding:6px; background:#14171f; color:#fff; border:1px solid #333; font-family:monospace;" />
+      </div>
+      <div class="dialog-footer">
+        <button id="add-confirm-btn" class="idm-btn primary">OK</button>
+        <button id="add-cancel-btn" class="idm-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Download File Info Dialog (IDM Dialog 130) -->
+  <div id="download-info-modal" class="idm-modal hidden">
+    <div class="idm-dialog" style="width: 540px;">
+      <div class="dialog-header">
+        <span>Download File Info</span>
+        <button id="info-modal-close" class="dialog-close">&times;</button>
+      </div>
+      <div class="dialog-body">
+        <div style="margin-bottom: 12px;">
+          <label>URL:</label>
+          <input id="info-url-input" type="text" readonly style="width: 100%; background: #14171f; color: #60a5fa; border: 1px solid #333; padding: 6px; font-family: monospace; font-size: 11px; margin-top: 4px;" />
+        </div>
+        <div style="display: flex; gap: 12px; margin-bottom: 12px;">
+          <div style="flex: 1;">
+            <label>Category:</label>
+            <select id="info-category-select" style="width: 100%; margin-top: 4px; padding: 6px; background: #14171f; color: #fff; border: 1px solid #333;">
+              <option value="General">General</option>
+              <option value="Compressed">Compressed</option>
+              <option value="Documents">Documents</option>
+              <option value="Music">Music</option>
+              <option value="Programs">Programs</option>
+              <option value="Video">Video</option>
+            </select>
+          </div>
+          <div style="flex: 1;">
+            <label>File Size:</label>
+            <input id="info-size-display" type="text" readonly value="Fetching..." style="width: 100%; margin-top: 4px; padding: 6px; background: #14171f; color: #10b981; border: 1px solid #333; font-weight: bold;" />
+          </div>
+        </div>
+        <div style="margin-bottom: 12px;">
+          <label>Save As:</label>
+          <div style="display: flex; gap: 6px; margin-top: 4px;">
+            <input id="info-dest-input" type="text" style="flex: 1; background: #14171f; color: #fff; border: 1px solid #333; padding: 6px;" />
+            <button id="info-browse-btn" class="idm-btn">Browse...</button>
+          </div>
+        </div>
+      </div>
+      <div class="dialog-footer" style="display: flex; justify-content: space-between;">
+        <button id="info-start-btn" class="idm-btn primary" style="min-width: 120px;">Start Download</button>
+        <div style="display: flex; gap: 8px;">
+          <button id="info-later-btn" class="idm-btn">Download Later</button>
+          <button id="info-cancel-btn" class="idm-btn">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Refresh Download Address Dialog -->
+  <div id="refresh-url-modal" class="idm-modal hidden">
+    <div class="idm-dialog" style="width: 520px;">
+      <div class="dialog-header">
+        <span>Refresh Download Address</span>
+        <button id="refresh-modal-close" class="dialog-close">&times;</button>
+      </div>
+      <div class="dialog-body">
+        <p style="margin-bottom: 8px;">The download link for this file has expired or requires a new web session.</p>
+        <p style="margin-bottom: 12px; color: #60a5fa;">Enter or capture the new URL to resume downloading from the exact same byte offset:</p>
+        <label>New Download URL:</label>
+        <input id="refresh-new-url-input" type="text" placeholder="https://example.com/new_expired_link.mp4" style="width: 100%; margin-top: 4px; padding: 6px; background: #14171f; color: #fff; border: 1px solid #333; font-family: monospace; font-size: 11px;" />
+      </div>
+      <div class="dialog-footer">
+        <button id="refresh-confirm-btn" class="idm-btn primary">Update URL & Resume</button>
+        <button id="refresh-cancel-btn" class="idm-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Options Overlay Modal -->
+  <div id="settings-overlay" class="idm-modal hidden">
+    <div class="idm-dialog" style="width: 520px;">
+      <div class="dialog-header">
+        <span>Internet Download Manager Configuration</span>
+        <button id="settings-close" class="dialog-close">&times;</button>
+      </div>
+      <div class="dialog-body">
+        <div style="margin-bottom: 12px;">
+          <label style="display:block; margin-bottom:6px;">Default Max Connections (Threads):</label>
+          <select id="cfg-max-conn" style="width:100%; padding:6px; background:#14171f; color:#fff; border:1px solid #333;">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="4">4</option>
+            <option value="8" selected>8 (Recommended)</option>
+            <option value="16">16</option>
+            <option value="32">32 (Maximum Speed)</option>
+          </select>
+        </div>
+        <div style="margin-bottom: 12px;">
+          <label style="display:block; margin-bottom:6px;">Default Save Directory:</label>
+          <div style="display:flex; gap:6px;">
+            <input id="cfg-save-dir" type="text" value="" style="flex:1; padding:6px; background:#14171f; color:#fff; border:1px solid #333;" />
+            <button id="cfg-browse-btn" class="idm-btn">Browse...</button>
+          </div>
+        </div>
+        <div>
+          <label style="display:block; margin-bottom:6px;">Speed Limit (KB/s, 0 = unlimited):</label>
+          <input id="cfg-speed-limit" type="number" min="0" step="1" value="0" style="width:100%; padding:6px; background:#14171f; color:#fff; border:1px solid #333;" />
+          <div style="font-size:10px; color:#888; margin-top:4px;">Applies as a global cap across all active downloads.</div>
+        </div>
+      </div>
+      <div class="dialog-footer">
+        <button id="settings-save" class="idm-btn primary">Save</button>
+        <button id="settings-cancel" class="idm-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="icons.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

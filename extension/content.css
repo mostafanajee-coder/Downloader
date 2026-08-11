@@ -1,0 +1,163 @@
+/* Authentic Hover-to-Expand IDM Video Grabber Badge */
+.ddl-float-btn {
+  position: absolute;
+  z-index: 2147483647;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0;
+  height: 26px;
+  border-radius: 13px;
+  border: 1px solid #10b981;
+  background: linear-gradient(180deg, #10b981 0%, #059669 100%);
+  color: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.45);
+  user-select: none;
+  direction: ltr;
+  overflow: hidden;
+  transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  opacity: 0.88;
+}
+
+.ddl-float-btn:hover {
+  opacity: 1;
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.65);
+  transform: scale(1.04);
+}
+
+.ddl-btn-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  height: 100%;
+  cursor: pointer;
+}
+
+.ddl-btn-main .idm-icon {
+  width: 14px;
+  height: 14px;
+  fill: #ffffff;
+}
+
+.ddl-btn-text {
+  white-space: nowrap;
+}
+
+.ddl-btn-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 7px;
+  height: 100%;
+  font-size: 13px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.85);
+  border-left: 1px solid rgba(255, 255, 255, 0.25);
+  cursor: pointer;
+}
+
+.ddl-btn-close:hover {
+  background: rgba(239, 68, 68, 0.9);
+  color: #ffffff;
+}
+
+.ddl-btn-help:hover {
+  background: rgba(255, 255, 255, 0.5);
+  color: #0f172a;
+}
+
+.ddl-btn-close:hover {
+  background: rgba(239, 68, 68, 0.85);
+  color: #ffffff;
+}
+
+.ddl-btn-close:hover {
+  background: rgba(220, 38, 38, 0.8);
+  color: #ffffff;
+}
+
+.ddl-float-btn:hover {
+  background: linear-gradient(180deg, #22c55e 0%, #16a34a 100%);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6);
+  transform: translateY(-1px);
+}
+
+.ddl-float-btn:active {
+  transform: translateY(0);
+}
+
+.ddl-float-btn .idm-icon {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.ddl-float-menu {
+  position: absolute;
+  z-index: 2147483647;
+  min-width: 260px;
+  max-width: 420px;
+  background: #1a1d24;
+  color: #e2e8f0;
+  border: 1px solid #2e3545;
+  border-radius: 6px;
+  padding: 6px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  font-size: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.75);
+  direction: ltr;
+  animation: ddlFadeIn 0.15s ease-out;
+}
+
+@keyframes ddlFadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.ddl-menu-item {
+  padding: 8px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  transition: background 0.15s ease;
+}
+
+.ddl-menu-item:hover {
+  background: #2b3245;
+  color: #ffffff;
+}
+
+.ddl-menu-badge {
+  background: #0284c7;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+
+.ddl-menu-empty {
+  padding: 10px 12px;
+  color: #94a3b8;
+  font-style: italic;
+  text-align: center;
+}
+
+.ddl-menu-sep {
+  padding: 8px 12px 4px;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-top: 1px solid #2e3545;
+  margin-top: 4px;
+}
