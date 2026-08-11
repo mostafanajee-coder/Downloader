@@ -96,7 +96,11 @@ function showMainWindow() {
     createWindow();
     return;
   }
-  mainWindow.show();
+  // The window may be minimized, hidden in the tray, or simply behind another
+  // app — un-do all three, in that order, so this reliably surfaces it no
+  // matter which state the user left it in.
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
   mainWindow.focus();
 }
 
@@ -166,7 +170,36 @@ process.on('unhandledRejection', (err) => {
   notifyUser('Downloader — unexpected error', message || 'An unexpected error occurred.');
 });
 
-app.whenReady().then(async () => {
+// --- Single instance ---------------------------------------------------------
+// Exactly one process may own the bridge port (127.0.0.1:9333) and the state
+// database. A second launch used to race the primary for both, which surfaced
+// as `listen EADDRINUSE 127.0.0.1:9333` and left the ghost instance running in
+// UI-only mode — the browser extension would then silently stop working
+// because it was talking to a bridge owned by the *other* process.
+//
+// The lock must be taken before anything with a side effect: if we don't own
+// it, this process registers no `whenReady` handler at all, so it never opens
+// the DB, never binds the port and never creates a tray icon — it just hands
+// its argv to the primary and exits.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  // Electron grants this process foreground rights for the duration of the
+  // event, so focus() here actually raises the window on Windows rather than
+  // just flashing the taskbar button.
+  app.on('second-instance', (_event, argv) => {
+    showMainWindow();
+    // A second launch is also how `downloader.exe --download <url>` reaches an
+    // already-running instance, so its command line still has to be honoured.
+    handleCommandLine(argv);
+  });
+
+  app.whenReady().then(bootstrap);
+}
+
+async function bootstrap() {
   Menu.setApplicationMenu(null);
 
   try {
@@ -193,6 +226,19 @@ app.whenReady().then(async () => {
     console.warn('Bridge failed to start, continuing in UI-only mode:', e.message);
   }
 
+  // createBridgeServer resolves with a null server rather than rejecting when
+  // the port can't be bound, so a failure is only visible here. With the
+  // single-instance lock in place this can no longer be our own ghost process
+  // — it means a genuinely unrelated program holds 9333 — and the consequence
+  // (the browser extension can't reach the app at all) is too big to leave in
+  // a console the user will never open.
+  if (!bridge || !bridge.httpServer) {
+    notifyUser(
+      'Downloader — browser integration unavailable',
+      'Port 9333 is in use by another program, so the browser extension cannot connect. Downloads added from the app itself still work.'
+    );
+  }
+
   createWindow();
   createTray();
   handleCommandLine(process.argv);
@@ -201,7 +247,7 @@ app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
     else showMainWindow();
   });
-});
+}
 
 app.on('before-quit', () => {
   app.isQuitting = true;

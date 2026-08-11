@@ -138,6 +138,13 @@ function createBridgeServer({ manager, port, allowedOrigins = [] }) {
   return new Promise((resolve) => {
     httpServer.on('error', (err) => {
       console.warn(`[BridgeServer] Port ${port} notice: ${err.message}. Continuing in UI mode.`);
+      // The manager listeners were attached up-front, before we knew whether
+      // the bind would succeed. Nothing will ever read their broadcasts now,
+      // so detach them rather than leaving this dead server subscribed to
+      // every progress tick for the lifetime of the app.
+      manager.off('added', onAdded);
+      manager.off('updated', onUpdated);
+      manager.off('removed', onRemoved);
       resolve({
         httpServer: null,
         wss: null,

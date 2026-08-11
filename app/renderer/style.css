@@ -235,8 +235,12 @@ html, body {
   overflow: auto;
 }
 
+/* Width is owned by the <colgroup> and driven from renderer.js while a header
+   divider is dragged, so no `width: 100%` here — it would fight the explicit
+   per-column widths under `table-layout: fixed`. .table-wrap's overflow gives
+   us the horizontal scrollbar once the columns outgrow the window, exactly
+   like a native list view. */
 .idm-table {
-  width: 100%;
   border-collapse: collapse;
   table-layout: fixed;
   background-color: #1e1e1e;
@@ -253,6 +257,54 @@ html, body {
   position: sticky;
   top: 0;
   z-index: 10;
+  /* Deliberately NOT `overflow: hidden` — the .col-resizer handle overhangs
+     this cell's left edge by design and must not be clipped. Header text is
+     truncated by the inner .th-label instead. */
+}
+
+.th-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- Drag-to-resize column dividers ---------------------------------------
+   The handle lives on the th to the RIGHT of the divider it controls and
+   overhangs leftwards, because sticky <th>s each form their own stacking
+   context at the same z-index: a later sibling always paints over an earlier
+   one, so overhanging left is hittable while overhanging right would be
+   swallowed by the next header cell. */
+.col-resizer {
+  position: absolute;
+  top: 0;
+  left: -4px;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 20;
+}
+
+.col-resizer::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  background-color: transparent;
+}
+
+.col-resizer:hover::after,
+.col-resizer.resizing::after {
+  background-color: var(--idm-win-select);
+}
+
+/* Keep the col-resize cursor for the whole drag even when the pointer runs
+   off the header and over the rows below. */
+body.col-resizing,
+body.col-resizing * {
+  cursor: col-resize !important;
 }
 
 .idm-table td {
@@ -263,6 +315,25 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--idm-win-text-bright);
+}
+
+/* The File Name cell has to stay a real table-cell so that the <colgroup>
+   width applies to it. Putting `display: flex` on the <td> itself pulled it
+   out of table layout — Chromium wrapped it in an anonymous cell and the
+   header ended up 53px wider than the body, throwing every column after it
+   out of alignment. The icon + label flex row lives in this inner wrapper
+   instead. */
+.cell-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cell-name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .idm-table tr:hover {
@@ -366,13 +437,12 @@ body.drag-active::after {
 }
 
 /* Columns */
-.col-q { width: 24px; text-align: center; }
-.col-name { width: 350px; }
-.col-size { width: 80px; text-align: right; }
-.col-status { width: 90px; }
-.col-eta { width: 80px; }
-.col-speed { width: 90px; text-align: right; }
-.col-date { width: 120px; }
+/* Alignment only — widths live in the <colgroup> so that dragging a divider
+   has one place to write to. A `width` here would silently win for the header
+   row under fixed layout and desynchronise the header from the body. */
+.col-q { text-align: center; }
+.col-size { text-align: right; }
+.col-speed { text-align: right; }
 
 /* Statusbar */
 .idm-statusbar {

@@ -2,6 +2,9 @@
 
 // Elements
 const queueBody = document.getElementById('queue-body');
+const queueTable = document.getElementById('queue-table');
+const queueColgroup = document.getElementById('queue-colgroup');
+const tableWrap = document.getElementById('table-wrap');
 const mainSidebar = document.getElementById('main-sidebar');
 const mainStatusbar = document.getElementById('main-statusbar');
 
@@ -43,6 +46,13 @@ const contextMenu = document.getElementById('idm-context-menu');
 // State
 const items = new Map();
 let selectedIds = new Set();
+// Anchor row for Shift+click / Shift+Arrow range selection, mirroring how a
+// Win32 list view works: the anchor stays put while the range grows and
+// shrinks around it, and only a plain or Ctrl click moves it.
+let selectionAnchorId = null;
+// The row the keyboard is "on" — where the next Arrow press steps from. Kept
+// separate from the anchor, which stays pinned while a Shift range grows.
+let _lastFocusedId = null;
 let currentCategory = 'all';
 let pendingDownloadUrl = '';
 let pendingRefreshId = null;
@@ -191,16 +201,25 @@ function injectIcons() {
   }
 }
 
-// 2. Render Table Rows
-function render() {
-  queueBody.innerHTML = '';
-
-  const filtered = Array.from(items.values()).filter((item) => {
+// The rows the user can actually see right now, in display order. Selection
+// operates strictly on this list rather than on the whole `items` map — a
+// Ctrl+A while the sidebar is filtered to "Finished" must not silently arm
+// the hidden Unfinished rows for the next Delete.
+function visibleItems() {
+  return Array.from(items.values()).filter((item) => {
     if (currentCategory === 'all') return true;
     if (currentCategory === 'unfinished') return item.status !== 'completed';
     if (currentCategory === 'finished') return item.status === 'completed';
     return categoryOf(item).toLowerCase() === currentCategory.toLowerCase();
   });
+}
+
+// 2. Render Table Rows
+function render() {
+  queueBody.innerHTML = '';
+
+  pruneSelection();
+  const filtered = visibleItems();
 
   for (const item of filtered) {
     const tr = document.createElement('tr');
@@ -240,9 +259,11 @@ function render() {
     const qCell = isHeld || item.status === 'queued' ? '<span class="q-mark" title="In queue"></span>' : '';
 
     tr.innerHTML = `
-      <td class="col-name" style="display:flex; align-items:center; gap:6px;">
-        <span>${iconSymbol}</span>
-        <span style="overflow:hidden; text-overflow:ellipsis;">${escapeHtml(item.filename || item.url)}</span>
+      <td class="col-name">
+        <div class="cell-name">
+          <span>${iconSymbol}</span>
+          <span class="cell-name-text">${escapeHtml(item.filename || item.url)}</span>
+        </div>
       </td>
       <td class="col-q">${qCell}</td>
       <td class="col-size">${formatBytes(item.size)}</td>
@@ -259,11 +280,10 @@ function render() {
     });
     tr.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      if (!selectedIds.has(item.id)) {
-        selectedIds.clear();
-        selectedIds.add(item.id);
-        render();
-      }
+      // Right-clicking inside an existing multi-selection keeps it (so the
+      // menu acts on all of them); right-clicking outside it selects just
+      // that row first, exactly like Explorer.
+      if (!selectedIds.has(item.id)) selectOnly(item.id);
       showContextMenu(e.clientX, e.clientY);
     });
 
@@ -276,18 +296,132 @@ function render() {
 
   if (statusActive) statusActive.textContent = `${activeCount} active downloads`;
   if (statusSpeed) statusSpeed.textContent = `Total speed: ${formatSpeed(totalSpeed)}`;
-  if (statusTotal) statusTotal.textContent = `${items.size} items`;
+  updateSelectionCount();
+}
+
+// --- Multi-row selection ----------------------------------------------------
+// Selection is deliberately decoupled from render(): changing it only toggles
+// the `selected` class on the rows already in the DOM. Re-running the whole
+// render() for a click meant tearing down and rebuilding every <tr> (and every
+// listener on them) just to repaint a highlight, which flickered and lost the
+// row under the cursor mid-drag.
+
+// Repaints the highlight from `selectedIds` without touching row structure.
+function applySelectionClasses() {
+  for (const tr of queueBody.children) {
+    tr.classList.toggle('selected', selectedIds.has(tr.dataset.id));
+  }
+  updateSelectionCount();
+}
+
+// Drops ids that are no longer selectable — either removed from the queue
+// entirely, or filtered out of the current category view. Without this the set
+// silently accumulates ghosts, and a later Delete would act on rows the user
+// can't see.
+function pruneSelection() {
+  const visible = new Set(visibleItems().map((i) => i.id));
+  for (const id of Array.from(selectedIds)) {
+    if (!visible.has(id)) selectedIds.delete(id);
+  }
+  if (selectionAnchorId != null && !visible.has(selectionAnchorId)) selectionAnchorId = null;
+}
+
+function selectOnly(id) {
+  selectedIds.clear();
+  if (id != null) selectedIds.add(id);
+  selectionAnchorId = id;
+  applySelectionClasses();
+}
+
+function toggleSelection(id) {
+  if (selectedIds.has(id)) selectedIds.delete(id);
+  else selectedIds.add(id);
+  // Ctrl+click moves the anchor even when it deselects, matching Explorer:
+  // a following Shift+click ranges from the row you last touched.
+  selectionAnchorId = id;
+  applySelectionClasses();
+}
+
+// Selects the contiguous run between the anchor and `id`. `additive` keeps the
+// existing selection (Ctrl+Shift+click) instead of replacing it.
+function selectRangeTo(id, additive) {
+  const order = visibleItems().map((i) => i.id);
+  const to = order.indexOf(id);
+  if (to === -1) return;
+  let from = selectionAnchorId != null ? order.indexOf(selectionAnchorId) : -1;
+  if (from === -1) from = to; // no usable anchor yet — degrade to a single row
+  if (!additive) selectedIds.clear();
+  const [lo, hi] = from <= to ? [from, to] : [to, from];
+  for (let i = lo; i <= hi; i++) selectedIds.add(order[i]);
+  applySelectionClasses();
+}
+
+function selectAllVisible() {
+  selectedIds.clear();
+  const order = visibleItems().map((i) => i.id);
+  for (const id of order) selectedIds.add(id);
+  if (order.length) selectionAnchorId = order[0];
+  applySelectionClasses();
+}
+
+function clearSelection() {
+  selectedIds.clear();
+  selectionAnchorId = null;
+  applySelectionClasses();
+}
+
+// Keyboard navigation. `delta` of -1/+1 steps a row; `extend` grows the range
+// from the anchor rather than replacing the selection.
+function moveSelection(delta, extend) {
+  const order = visibleItems().map((i) => i.id);
+  if (!order.length) return;
+
+  // Step from the row the user last acted on, falling back to the edge of the
+  // list so a first Arrow press with nothing selected still does something.
+  const currentId = _lastFocusedId != null && order.includes(_lastFocusedId)
+    ? _lastFocusedId
+    : Array.from(selectedIds).filter((id) => order.includes(id)).pop();
+  let next;
+  if (currentId == null) {
+    next = delta > 0 ? order[0] : order[order.length - 1];
+  } else {
+    const idx = order.indexOf(currentId);
+    next = order[Math.max(0, Math.min(order.length - 1, idx + delta))];
+  }
+
+  _lastFocusedId = next;
+  if (extend) selectRangeTo(next, false);
+  else selectOnly(next);
+  scrollRowIntoView(next);
+}
+
+function scrollRowIntoView(id) {
+  const tr = queueBody.querySelector(`tr[data-id="${CSS.escape(String(id))}"]`);
+  if (tr) tr.scrollIntoView({ block: 'nearest' });
+}
+
+function updateSelectionCount() {
+  if (!statusTotal) return;
+  const suffix = selectedIds.size > 1 ? ` (${selectedIds.size} selected)` : '';
+  statusTotal.textContent = `${items.size} items${suffix}`;
 }
 
 function handleRowClick(e, id) {
-  if (e.ctrlKey) {
-    if (selectedIds.has(id)) selectedIds.delete(id);
-    else selectedIds.add(id);
-  } else {
-    selectedIds.clear();
-    selectedIds.add(id);
-  }
-  render();
+  _lastFocusedId = id;
+  if (e.shiftKey) selectRangeTo(id, e.ctrlKey);
+  else if (e.ctrlKey) toggleSelection(id);
+  else selectOnly(id);
+}
+
+// Clicking the empty space under the last row clears the selection, the way a
+// native list view does. Bound on the scroll container so it also catches
+// clicks below a short list.
+if (tableWrap) {
+  tableWrap.addEventListener('mousedown', (e) => {
+    // A header click lands on the thead <tr>, so this also correctly leaves
+    // the selection alone when the user grabs a column divider.
+    if (!e.target.closest('tr')) clearSelection();
+  });
 }
 
 function showContextMenu(x, y) {
@@ -541,7 +675,7 @@ document.getElementById('delete-confirm-ok-btn')?.addEventListener('click', asyn
     }
     if (window.api.remove) window.api.remove(id);
   }
-  selectedIds.clear();
+  clearSelection();
   closeDeleteConfirm();
   render();
 });
@@ -811,7 +945,7 @@ document.getElementById('dd-delete-done')?.addEventListener('click', () => {
       if (window.api.remove) window.api.remove(id);
     }
   }
-  selectedIds.clear();
+  clearSelection();
   render();
 });
 
@@ -1377,7 +1511,7 @@ if (clearDoneBtn) {
         if (window.api.remove) window.api.remove(id);
       }
     }
-    selectedIds.clear();
+    clearSelection();
     render();
   });
 }
@@ -1431,11 +1565,25 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     pasteUrlIntoAddModal();
   } else if (e.ctrlKey && e.key.toLowerCase() === 'a') {
-    // Ctrl+A: select all items in the list
+    // Ctrl+A: select every row currently on screen. Scoped to the visible
+    // (category-filtered) rows on purpose — selecting the hidden ones as well
+    // used to highlight only a subset while arming the rest for Delete.
     e.preventDefault();
-    selectedIds.clear();
-    for (const item of items.values()) selectedIds.add(item.id);
-    render();
+    selectAllVisible();
+  } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    // Arrow keys walk the list; Shift extends the range from the anchor.
+    e.preventDefault();
+    moveSelection(e.key === 'ArrowDown' ? 1 : -1, e.shiftKey);
+  } else if (e.key === 'Home' || e.key === 'End') {
+    e.preventDefault();
+    const order = visibleItems().map((i) => i.id);
+    if (order.length) {
+      const target = e.key === 'Home' ? order[0] : order[order.length - 1];
+      _lastFocusedId = target;
+      if (e.shiftKey) selectRangeTo(target, false);
+      else selectOnly(target);
+      scrollRowIntoView(target);
+    }
   } else if (e.key === 'Delete' && e.shiftKey) {
     // Shift+Delete: delete selected downloads + delete the file(s) from disk
     e.preventDefault();
@@ -1554,12 +1702,239 @@ function scheduleTableRender() {
   }, 100);
 }
 
+// --- Resizable table columns -------------------------------------------------
+// The <colgroup> in index.html is the single source of truth for column
+// geometry (the table is `table-layout: fixed`, so <col> widths drive both the
+// header and the body from one place). Everything below reads and writes those
+// <col> elements; nothing else in the app touches column widths.
+//
+// The final column is the "fill" column: it has no stored width and instead
+// absorbs whatever horizontal space is left, so the table always spans the
+// window. It therefore has no drag handle — shrinking it would just be undone
+// on the next layout pass.
+const COL_WIDTH_STORAGE_KEY = 'idm.columnWidths.v1';
+const DEFAULT_COL_MIN = 40;
+const MAX_COL_WIDTH = 1200;
+
+function columnDefs() {
+  return queueColgroup ? Array.from(queueColgroup.children) : [];
+}
+
+function headerCells() {
+  return queueTable ? Array.from(queueTable.querySelectorAll('thead th')) : [];
+}
+
+function colMin(col) {
+  const m = parseInt(col.dataset.min, 10);
+  return isFinite(m) && m > 0 ? m : DEFAULT_COL_MIN;
+}
+
+function colWidth(col) {
+  const px = parseFloat(col.style.width);
+  if (isFinite(px) && px > 0) return px;
+  // Not sized yet (the fill column before the first layout pass) — fall back
+  // to whatever the browser actually laid the matching header cell out at.
+  const th = headerCells()[columnDefs().indexOf(col)];
+  return th ? Math.round(th.getBoundingClientRect().width) : DEFAULT_COL_MIN;
+}
+
+// Recomputes the fill column and the table's own width so that the sum of the
+// columns is always exactly the table width. Leaving that to the browser means
+// fixed layout redistributes any slack across every column, which makes a drag
+// move the divider by something other than the distance the mouse travelled.
+function applyColumnLayout() {
+  const cols = columnDefs();
+  if (!cols.length || !queueTable || !tableWrap) return;
+
+  // Zero means the container hasn't been laid out yet (the window is still
+  // hidden, or this ran before the first paint). Sizing the fill column
+  // against 0 would collapse it to its minimum and leave it stuck there, so
+  // wait — the ResizeObserver below fires as soon as there's a real width.
+  const available = tableWrap.clientWidth;
+  if (available <= 0) return;
+
+  const lastIndex = cols.length - 1;
+  let fixedTotal = 0;
+  for (let i = 0; i < lastIndex; i++) fixedTotal += colWidth(cols[i]);
+
+  const fillWidth = Math.max(colMin(cols[lastIndex]), available - fixedTotal);
+  cols[lastIndex].style.width = `${fillWidth}px`;
+  queueTable.style.width = `${fixedTotal + fillWidth}px`;
+}
+
+function loadColumnWidths() {
+  let saved;
+  try {
+    saved = JSON.parse(localStorage.getItem(COL_WIDTH_STORAGE_KEY) || 'null');
+  } catch (e) {
+    return; // unavailable or corrupt JSON — the markup defaults stand
+  }
+  if (!saved || typeof saved !== 'object') return;
+
+  for (const col of columnDefs()) {
+    const w = saved[col.dataset.key];
+    // Anything out of range is ignored rather than clamped: a corrupted entry
+    // should fall back to the sane default, not to a 1px sliver the user then
+    // has to find and drag back open.
+    if (typeof w === 'number' && isFinite(w) && w >= colMin(col) && w <= MAX_COL_WIDTH) {
+      col.style.width = `${w}px`;
+    }
+  }
+}
+
+function saveColumnWidths() {
+  try {
+    const cols = columnDefs();
+    const out = {};
+    // Keyed by data-key, not index, so adding or reordering a column later
+    // can't silently apply the wrong saved width to it.
+    for (let i = 0; i < cols.length - 1; i++) out[cols[i].dataset.key] = Math.round(colWidth(cols[i]));
+    localStorage.setItem(COL_WIDTH_STORAGE_KEY, JSON.stringify(out));
+  } catch (e) {
+    /* storage full or disabled — widths just won't persist across restarts */
+  }
+}
+
+// Intrinsic width of an element's contents, via a Range over them. scrollWidth
+// is no use here: for content that already fits it just reports the element's
+// own laid-out width, so auto-fit would only ever "fit" a column to itself.
+// A Range measures the text's real extent regardless of what's clipping it.
+function measureContentWidth(el) {
+  if (!el) return 0;
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  return range.getBoundingClientRect().width;
+}
+
+function cellContentWidth(cell) {
+  // The inline progress bar is width:100% of its column by design, so it would
+  // report the current width straight back and pin auto-fit where it is.
+  if (cell.querySelector('.idm-progress')) return 0;
+
+  // The File Name cell holds a type icon next to the label; measure the label
+  // and add the icon plus the flex gap.
+  const nameText = cell.querySelector('.cell-name-text');
+  if (nameText) {
+    const icon = cell.querySelector('.cell-name > span');
+    return measureContentWidth(nameText) + (icon ? icon.offsetWidth + 6 : 0);
+  }
+  return measureContentWidth(cell);
+}
+
+// Double-clicking a divider sizes the column to its widest visible cell — the
+// same gesture Explorer and IDM both support.
+function autoFitColumn(index) {
+  const col = columnDefs()[index];
+  if (!col) return;
+
+  let widest = measureContentWidth(headerCells()[index]?.querySelector('.th-label'));
+  for (const tr of queueBody.children) {
+    const cell = tr.children[index];
+    if (cell) widest = Math.max(widest, cellContentWidth(cell));
+  }
+
+  col.style.width = `${Math.max(colMin(col), Math.min(widest + 14, MAX_COL_WIDTH))}px`; // +14 for cell padding + border
+  applyColumnLayout();
+  saveColumnWidths();
+}
+
+function beginColumnResize(e, handle, col) {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+
+  const startX = e.clientX;
+  const startWidth = colWidth(col);
+  const min = colMin(col);
+
+  handle.classList.add('resizing');
+  document.body.classList.add('col-resizing');
+  // Pointer capture keeps move/up events flowing to this handle even once the
+  // cursor leaves it — without it a fast drag detaches and strands the table
+  // in resizing state with no pointerup to clean it up.
+  try {
+    handle.setPointerCapture(e.pointerId);
+  } catch (err) {
+    /* capture unsupported — the drag still works, just less forgivingly */
+  }
+
+  const onMove = (ev) => {
+    col.style.width = `${Math.max(min, Math.min(startWidth + (ev.clientX - startX), MAX_COL_WIDTH))}px`;
+    applyColumnLayout();
+  };
+
+  const onEnd = () => {
+    handle.removeEventListener('pointermove', onMove);
+    handle.removeEventListener('pointerup', onEnd);
+    handle.removeEventListener('pointercancel', onEnd);
+    handle.classList.remove('resizing');
+    document.body.classList.remove('col-resizing');
+    try {
+      handle.releasePointerCapture(e.pointerId);
+    } catch (err) {
+      /* pointer already gone */
+    }
+    saveColumnWidths();
+  };
+
+  handle.addEventListener('pointermove', onMove);
+  handle.addEventListener('pointerup', onEnd);
+  handle.addEventListener('pointercancel', onEnd);
+}
+
+function initColumnResizing() {
+  const cols = columnDefs();
+  const ths = headerCells();
+  if (!queueTable || !tableWrap || !cols.length) return;
+  if (cols.length !== ths.length) {
+    console.warn('[Columns] <colgroup> and <th> counts differ — skipping resize wiring.');
+    return;
+  }
+
+  loadColumnWidths();
+  applyColumnLayout();
+
+  // Each handle sits on the header cell to the RIGHT of the divider it
+  // controls and overhangs leftwards — see .col-resizer in style.css for why
+  // overhanging the other way would be unhittable.
+  for (let i = 1; i < ths.length; i++) {
+    const target = cols[i - 1];
+    const handle = document.createElement('div');
+    handle.className = 'col-resizer';
+    handle.title = 'Drag to resize · double-click to fit contents';
+    handle.addEventListener('pointerdown', (ev) => beginColumnResize(ev, handle, target));
+    handle.addEventListener('dblclick', (ev) => {
+      ev.preventDefault();
+      autoFitColumn(i - 1);
+    });
+    ths[i].appendChild(handle);
+  }
+
+  // A ResizeObserver rather than window.onresize: it also fires for the first
+  // real layout pass (so a window that starts hidden still gets a correctly
+  // sized fill column) and for width changes that aren't window resizes at
+  // all, such as the sidebar being toggled.
+  if (typeof ResizeObserver === 'function') {
+    let lastWidth = -1;
+    const ro = new ResizeObserver(() => {
+      const w = tableWrap.clientWidth;
+      if (w === lastWidth) return; // ignore height-only changes; nothing to redo
+      lastWidth = w;
+      applyColumnLayout();
+    });
+    ro.observe(tableWrap);
+  } else {
+    window.addEventListener('resize', applyColumnLayout);
+  }
+}
+
 // --- Initialization ---
 let _initialized = false;
 function init() {
   if (_initialized) return; // guard against DOMContentLoaded + fallback double-call
   _initialized = true;
   injectIcons();
+  initColumnResizing();
 
   if (window.api && window.api.getConfig) {
     window.api.getConfig().then((c) => { appConfig = c || {}; }).catch(() => {});

@@ -183,18 +183,34 @@
 
     <!-- Right Table Area with Classic Win32 Columns -->
     <div class="idm-content">
-      <div class="table-wrap">
-        <table class="idm-table">
+      <div class="table-wrap" id="table-wrap">
+        <!-- table-layout is `fixed`, so these <col> widths are the single
+             source of truth for column geometry. renderer.js rewrites them
+             live while a header divider is dragged, and persists them per
+             `data-key`. The last column carries no width: it is the fill
+             column that absorbs whatever horizontal space is left over, so it
+             has no drag handle of its own. -->
+        <table class="idm-table" id="queue-table">
+          <colgroup id="queue-colgroup">
+            <col data-key="name" data-min="120" style="width: 350px;" />
+            <col data-key="q" data-min="24" style="width: 28px;" />
+            <col data-key="size" data-min="56" style="width: 92px;" />
+            <col data-key="status" data-min="70" style="width: 104px;" />
+            <col data-key="eta" data-min="60" style="width: 92px;" />
+            <col data-key="speed" data-min="60" style="width: 104px;" />
+            <col data-key="date" data-min="70" style="width: 138px;" />
+            <col data-key="description" data-min="80" />
+          </colgroup>
           <thead>
             <tr>
-              <th class="col-name">File Name</th>
-              <th class="col-q">Q</th>
-              <th class="col-size">Size</th>
-              <th class="col-status">Status</th>
-              <th class="col-eta">Time left</th>
-              <th class="col-speed">Transfer rate</th>
-              <th class="col-date">Last try date</th>
-              <th style="width: 120px;">Description</th>
+              <th class="col-name"><span class="th-label">File Name</span></th>
+              <th class="col-q"><span class="th-label">Q</span></th>
+              <th class="col-size"><span class="th-label">Size</span></th>
+              <th class="col-status"><span class="th-label">Status</span></th>
+              <th class="col-eta"><span class="th-label">Time left</span></th>
+              <th class="col-speed"><span class="th-label">Transfer rate</span></th>
+              <th class="col-date"><span class="th-label">Last try date</span></th>
+              <th class="col-desc"><span class="th-label">Description</span></th>
             </tr>
           </thead>
           <tbody id="queue-body"></tbody>
