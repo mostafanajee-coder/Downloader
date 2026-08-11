@@ -116,6 +116,23 @@ function createBridgeServer({ manager, port, allowedOrigins = [] }) {
     ws.on('close', () => {
       clients.delete(ws);
     });
+
+    // Node's `ws` connections are EventEmitters — an 'error' event with no
+    // listener throws and can take down the whole Electron main process.
+    // Abrupt disconnects (extension reload, browser crash, ECONNRESET) land
+    // here rather than 'close', so this must be handled defensively even
+    // though 'close' usually fires too (cleanup below is idempotent).
+    ws.on('error', (err) => {
+      console.warn('[BridgeServer] Connection error:', err.message);
+      clients.delete(ws);
+    });
+  });
+
+  // Same reasoning for the server-level socket — a listen-time bind failure
+  // is already handled below, but this covers any later runtime error on the
+  // WebSocketServer itself.
+  wss.on('error', (err) => {
+    console.warn('[BridgeServer] WebSocketServer error:', err.message);
   });
 
   return new Promise((resolve) => {

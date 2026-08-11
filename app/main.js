@@ -56,30 +56,39 @@ function createWindow() {
       return false;
     }
   });
+}
 
-  const forward = (channel) => (payload) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send(channel, payload);
-    }
-  };
-  manager.on('added', forward('queue:item-added'));
-  manager.on('updated', (payload) => {
-    forward('queue:item-updated')(payload);
-  });
-  manager.on('removed', forward('queue:item-removed'));
-  manager.on('queue-state', forward('queue:state-changed'));
+// Wires Manager events to the renderer/tray exactly once, for the app's whole
+// lifetime — NOT from inside createWindow(). createWindow() can legitimately
+// run more than once (e.g. macOS `activate` recreating a destroyed window),
+// and registering these listeners there would duplicate them on every
+// recreation: duplicate IPC forwards, duplicate "Download Complete" toasts,
+// worse with every cycle. sendToWindow() already safely no-ops when there's
+// no live window, so this wiring is independent of window lifecycle.
+function wireManagerEvents() {
+  manager.on('added', (item) => sendToWindow('queue:item-added', item));
+  manager.on('updated', (item) => sendToWindow('queue:item-updated', item));
+  manager.on('removed', (info) => sendToWindow('queue:item-removed', info));
+  manager.on('queue-state', (state) => sendToWindow('queue:state-changed', state));
 
   const notifiedSet = new Set();
   manager.on('updated', (item) => {
     if (item.status === 'completed' && !notifiedSet.has(item.id)) {
       notifiedSet.add(item.id);
-      notifier.notify({
-        title: 'Download Complete',
-        message: `${item.filename || 'A file'} has finished downloading.`,
-        wait: false,
-      });
+      notifyUser('Download Complete', `${item.filename || 'A file'} has finished downloading.`);
     }
   });
+}
+
+// Best-effort system notification. Wrapped so a broken notifier backend
+// (missing notify-send on some Linux setups, etc.) can never itself take down
+// the process — a failed notification should be a no-op, not a crash.
+function notifyUser(title, message) {
+  try {
+    notifier.notify({ title, message, wait: false });
+  } catch (e) {
+    console.warn('[Notifier] Failed to show notification:', e.message);
+  }
 }
 
 function showMainWindow() {
@@ -132,29 +141,56 @@ function handleCommandLine(argv) {
   const dlIndex = argv.indexOf('--download');
   if (dlIndex !== -1 && argv.length > dlIndex + 1) {
     const url = argv[dlIndex + 1];
-    manager.add({ url });
+    try {
+      manager.add({ url });
+    } catch (err) {
+      console.warn('[handleCommandLine] Failed to add URL from command line:', err.message);
+    }
   }
 }
 
+// Last-resort safety nets. A packaged .exe has no visible console, so a bare
+// console.warn here is effectively invisible to the user — best-effort
+// surface it as a system notification too, so a real problem is at least
+// discoverable instead of the app silently misbehaving. These must never
+// throw themselves (that would recurse into the same handler), so every
+// side effect here is individually try/caught.
 process.on('uncaughtException', (err) => {
-  console.warn('[Main Process Warning]', err.message);
+  console.warn('[Main Process Exception]', err && err.stack ? err.stack : err);
+  notifyUser('Downloader — unexpected error', (err && err.message) || 'An unexpected error occurred.');
 });
 
 process.on('unhandledRejection', (err) => {
+  const message = err instanceof Error ? err.message : String(err);
   console.warn('[Main Process Rejection]', err);
+  notifyUser('Downloader — unexpected error', message || 'An unexpected error occurred.');
 });
 
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
 
-  config = new ConfigManager(stateDir);
-  manager = new Manager({ stateDir, config });
+  try {
+    config = new ConfigManager(stateDir);
+    manager = new Manager({ stateDir, config });
+  } catch (err) {
+    // Can't recover from a broken state directory / corrupt DB — tell the
+    // user plainly (a native dialog works even though no window/renderer
+    // exists yet) and exit cleanly rather than continuing with `manager`
+    // undefined, which would make every IPC handler below throw forever.
+    dialog.showErrorBox(
+      'Internet Download Manager — Startup Failed',
+      `The app could not initialize its download state:\n\n${err.message}\n\nCheck that ${stateDir} is writable, then restart the app.`
+    );
+    app.exit(1);
+    return;
+  }
+
+  wireManagerEvents();
 
   try {
     bridge = await createBridgeServer({ manager, port: 9333 });
-    console.log(`Bridge listening on ws://127.0.0.1:9333`);
   } catch (e) {
-    console.warn(`Bridge port busy, starting UI mode:`, e.message);
+    console.warn('Bridge failed to start, continuing in UI-only mode:', e.message);
   }
 
   createWindow();

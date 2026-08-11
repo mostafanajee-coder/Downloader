@@ -110,6 +110,31 @@ function escapeHtml(s) {
   );
 }
 
+// Surfaces an otherwise-invisible error (unhandled promise rejection, uncaught
+// exception) as a brief, non-blocking toast instead of letting it silently
+// vanish into the DevTools console where a normal user will never see it.
+let _errorToastTimer = null;
+function showTransientError(message) {
+  const el = document.getElementById('error-toast');
+  if (!el) return;
+  el.textContent = message;
+  el.classList.remove('hidden');
+  clearTimeout(_errorToastTimer);
+  _errorToastTimer = setTimeout(() => el.classList.add('hidden'), 6000);
+}
+
+window.addEventListener('unhandledrejection', (e) => {
+  const reason = e.reason;
+  const message = reason instanceof Error ? reason.message : String(reason);
+  console.error('[Unhandled rejection]', reason);
+  showTransientError(`Unexpected error: ${message}`);
+});
+
+window.addEventListener('error', (e) => {
+  console.error('[Uncaught error]', e.error || e.message);
+  showTransientError(`Unexpected error: ${e.message || 'something went wrong'}`);
+});
+
 function formatBytes(bytes) {
   if (bytes == null || isNaN(bytes)) return '—';
   if (bytes === 0) return '0 B';
@@ -1514,6 +1539,21 @@ function updateSidebarBadges() {
   }
 }
 
+// Coalesces bursts of queue:item-updated events (one active download emits a
+// progress tick roughly every 400ms; several concurrent downloads can land
+// within the same short window) into a single table rebuild + badge
+// recompute, instead of doing that full-DOM work on every single event.
+let _tableRenderScheduled = false;
+function scheduleTableRender() {
+  if (_tableRenderScheduled) return;
+  _tableRenderScheduled = true;
+  setTimeout(() => {
+    _tableRenderScheduled = false;
+    render();
+    updateSidebarBadges();
+  }, 100);
+}
+
 // --- Initialization ---
 let _initialized = false;
 function init() {
@@ -1549,8 +1589,7 @@ function init() {
       if (item) {
         items.set(item.id, item);
         checkQueueComplete();
-        render();
-        updateSidebarBadges();
+        scheduleTableRender();
       }
     });
   }
@@ -1569,8 +1608,7 @@ function init() {
           }
         }
         checkQueueComplete();
-        render();
-        updateSidebarBadges();
+        scheduleTableRender();
       }
     });
   }
@@ -1583,8 +1621,7 @@ function init() {
         // Recompute the active baseline silently — removing an item must not
         // be mistaken for the queue finishing.
         _prevActive = Array.from(items.values()).filter((i) => i.status === 'running' || i.status === 'queued').length;
-        render();
-        updateSidebarBadges();
+        scheduleTableRender();
       }
     });
   }

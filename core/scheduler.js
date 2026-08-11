@@ -49,11 +49,9 @@ class ScheduleManager extends EventEmitter {
         if (!task.executedToday) {
           task.executedToday = true;
           if (task.type === 'start_queue') {
-            console.log(`[Scheduler] Triggered Start Queue '${task.queueName}' at ${currentHHMM}`);
             this.manager.startAll();
             this.emit('queue-started', { queueName: task.queueName, time: currentHHMM });
           } else if (task.type === 'stop_queue') {
-            console.log(`[Scheduler] Triggered Stop Queue '${task.queueName}' at ${currentHHMM}`);
             this.manager.pauseAll();
             this.emit('queue-stopped', { queueName: task.queueName, time: currentHHMM });
           }

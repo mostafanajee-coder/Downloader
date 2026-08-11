@@ -217,6 +217,11 @@
     </div>
   </div>
 
+  <!-- Transient error toast: surfaces otherwise-invisible unexpected errors
+       (unhandled promise rejections, uncaught exceptions) instead of letting
+       them silently vanish into the console. -->
+  <div id="error-toast" class="error-toast hidden"></div>
+
   <!-- Right-Click Context Menu -->
   <div id="idm-context-menu" class="idm-context-menu hidden">
     <div class="ctx-item" id="ctx-open">Open</div>

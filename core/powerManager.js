@@ -28,7 +28,6 @@ class PowerManager extends EventEmitter {
   triggerPowerAction() {
     if (!this.autoShutdownEnabled) return;
 
-    console.log(`[PowerManager] Triggering Windows ${this.action}...`);
     this.emit('power-action-triggered', { action: this.action });
 
     if (process.platform === 'win32') {

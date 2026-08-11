@@ -110,8 +110,23 @@ class Manager extends EventEmitter {
       const category = getCategoryForUrl(singleUrl, kind, suggestedFilename);
       const destDirs = this.config ? this.config.get('destDirs') : {};
       const finalDestDir = destDir || destDirs[category] || destDirs['General'] || process.cwd();
-      if (!fs.existsSync(finalDestDir)) {
-        fs.mkdirSync(finalDestDir, { recursive: true });
+      try {
+        const existingStat = fs.existsSync(finalDestDir) ? fs.statSync(finalDestDir) : null;
+        if (!existingStat) {
+          fs.mkdirSync(finalDestDir, { recursive: true });
+        } else if (!existingStat.isDirectory()) {
+          // Something exists at this path but it's a file, not a directory —
+          // existsSync() alone can't tell them apart, and silently proceeding
+          // would only surface a much more cryptic failure later, deep inside
+          // the download task's own file writes.
+          throw new Error(`Destination path exists but is not a directory: ${finalDestDir}`);
+        }
+      } catch (err) {
+        // A disk-full/permission/not-a-directory failure for ONE destination
+        // shouldn't abort the rest of a batch add (e.g. 50 URLs from the
+        // Batch Download modal) — skip just this URL and keep going.
+        console.error(`Failed to prepare destination directory "${finalDestDir}" for ${singleUrl}:`, err.message);
+        continue;
       }
 
       const item = {

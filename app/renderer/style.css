@@ -766,6 +766,28 @@ body.drag-active::after {
   word-break: break-all;
 }
 
+/* Transient error toast */
+.error-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 34px;
+  transform: translateX(-50%);
+  max-width: 520px;
+  background: #3a1414;
+  border: 1px solid #ef4444;
+  color: #fecaca;
+  padding: 8px 14px;
+  border-radius: 4px;
+  font-size: 11px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  z-index: 6000;
+  pointer-events: none;
+}
+
+.error-toast.hidden {
+  display: none;
+}
+
 /* Context Menu */
 .idm-context-menu {
   position: fixed;

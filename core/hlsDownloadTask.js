@@ -247,7 +247,13 @@ class HlsDownloadTask extends EventEmitter {
       proc.stderr.on('data', (d) => {
         stderr += d.toString();
       });
-      proc.on('error', reject);
+      proc.on('error', (err) => {
+        if (err && err.code === 'ENOENT') {
+          reject(new Error('FFmpeg was not found. Install FFmpeg and make sure it is available in your system PATH — it is required to remux HLS downloads.'));
+        } else {
+          reject(err);
+        }
+      });
       proc.on('close', (code) => {
         if (code === 0) resolve();
         else reject(new Error(`ffmpeg exited with code ${code}: ${stderr.slice(-2000)}`));
@@ -256,7 +262,13 @@ class HlsDownloadTask extends EventEmitter {
   }
 
   _cleanup() {
-    fs.rmSync(this.segDir, { recursive: true, force: true });
+    // A failed temp-dir removal (locked file, permissions) shouldn't turn an
+    // otherwise-successful download into a reported error — best-effort only.
+    try {
+      fs.rmSync(this.segDir, { recursive: true, force: true });
+    } catch (err) {
+      console.warn(`[HlsDownloadTask] Failed to clean up temp segments at ${this.segDir}:`, err.message);
+    }
   }
 }
 
