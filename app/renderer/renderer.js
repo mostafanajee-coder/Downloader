@@ -49,6 +49,7 @@ let pendingRefreshId = null;
 let appConfig = {}; // last-known config (for sound toggles etc.)
 let _prevActive = 0; // active-download count, for queue-complete detection
 let queueRunning = false; // whether Start Queue has been invoked (vs Stop Queue)
+let completeDialogItem = null; // item currently shown in the Download Complete dialog
 
 // --- Sound events (WebAudio tones; no bundled assets needed) ---
 let _audioCtx = null;
@@ -345,6 +346,72 @@ if (infoLaterBtn) {
   });
 }
 
+// --- Download Complete Dialog (IDM's signature completion popup) -----------
+function fileIconKeyFor(filename) {
+  const ext = (filename || '').split('.').pop().toLowerCase();
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'ico'].includes(ext)) return 'image';
+  if (['zip', 'rar', '7z', 'tar', 'gz', 'iso'].includes(ext)) return 'archive';
+  if (['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'].includes(ext)) return 'doc';
+  if (['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a'].includes(ext)) return 'music';
+  if (['exe', 'msi', 'apk'].includes(ext)) return 'exe';
+  return 'film';
+}
+
+function showDownloadCompleteDialog(item) {
+  if (!item) return;
+  const modal = document.getElementById('download-complete-modal');
+  if (!modal) return;
+
+  completeDialogItem = item;
+
+  const iconEl = document.getElementById('complete-file-icon');
+  if (iconEl) iconEl.innerHTML = icon(fileIconKeyFor(item.filename), 24);
+
+  const nameEl = document.getElementById('complete-filename');
+  if (nameEl) nameEl.textContent = item.filename || item.url;
+
+  const sizeEl = document.getElementById('complete-size');
+  if (sizeEl) sizeEl.textContent = formatBytes(item.size);
+
+  const speedEl = document.getElementById('complete-speed');
+  if (speedEl) {
+    const elapsedSec = item.startedAt && item.completedAt ? (item.completedAt - item.startedAt) / 1000 : 0;
+    speedEl.textContent = elapsedSec > 0 && item.size ? formatSpeed(item.size / elapsedSec) : '—';
+  }
+
+  const pathEl = document.getElementById('complete-path');
+  if (pathEl) pathEl.textContent = item.destPath || '—';
+
+  const dontShowCb = document.getElementById('complete-dont-show');
+  if (dontShowCb) dontShowCb.checked = false;
+
+  modal.classList.remove('hidden');
+}
+
+function hideDownloadCompleteDialog() {
+  document.getElementById('download-complete-modal')?.classList.add('hidden');
+}
+
+document.getElementById('complete-modal-close')?.addEventListener('click', hideDownloadCompleteDialog);
+document.getElementById('complete-close-btn')?.addEventListener('click', hideDownloadCompleteDialog);
+
+document.getElementById('complete-open-file-btn')?.addEventListener('click', () => {
+  if (completeDialogItem && completeDialogItem.destPath && window.api.openFile) {
+    window.api.openFile(completeDialogItem.destPath);
+  }
+});
+
+document.getElementById('complete-open-folder-btn')?.addEventListener('click', () => {
+  if (completeDialogItem && completeDialogItem.destPath && window.api.showInFolder) {
+    window.api.showInFolder(completeDialogItem.destPath);
+  }
+});
+
+document.getElementById('complete-dont-show')?.addEventListener('change', (e) => {
+  appConfig.showCompleteDialog = !e.target.checked;
+  if (window.api.setConfig) window.api.setConfig({ showCompleteDialog: !e.target.checked });
+});
+
 // Toolbar Action Buttons
 const resumeAllBtn = document.getElementById('resume-all-btn');
 if (resumeAllBtn) {
@@ -400,6 +467,7 @@ async function openOptions() {
       setChecked('cfg-int-edge', integ.edge);
       setChecked('cfg-int-brave', integ.brave);
       setChecked('cfg-int-firefox', integ.firefox);
+      setChecked('cfg-show-complete', cfg.showCompleteDialog !== false);
 
       // Connection
       if (cfg.connectionType) setVal('cfg-conn-type', cfg.connectionType);
@@ -448,6 +516,7 @@ async function saveOptions() {
         brave: getChecked('cfg-int-brave'),
         firefox: getChecked('cfg-int-firefox'),
       },
+      showCompleteDialog: getChecked('cfg-show-complete'),
       connectionType: getVal('cfg-conn-type'),
       maxConnections: parseInt(getVal('cfg-max-conn'), 10) || 8,
       maxConcurrentDownloads: parseInt(getVal('cfg-max-simultaneous'), 10) || 4,
@@ -770,6 +839,255 @@ setInterval(() => {
   }
 }, 1000);
 
+// --- Site Grabber Wizard ----------------------------------------------------
+const grabberModal = document.getElementById('grabber-modal');
+const grabAssets = new Map(); // url -> asset (as streamed from the crawl)
+const grabSelected = new Set(); // urls currently checked for download
+let grabStep = 1;
+let _grabRenderScheduled = false;
+
+function goToGrabStep(n) {
+  grabStep = n;
+  document.querySelectorAll('.wizard-step').forEach((el) => el.classList.toggle('active', Number(el.dataset.step) === n));
+  document.querySelectorAll('.wizard-panel').forEach((el) => el.classList.toggle('active', Number(el.dataset.wpanel) === n));
+
+  const backBtn = document.getElementById('grab-back-btn');
+  const nextBtn = document.getElementById('grab-next-btn');
+  const downloadBtn = document.getElementById('grab-download-btn');
+  const selectAllWrap = document.getElementById('grab-select-all-wrap');
+  if (backBtn) backBtn.disabled = n === 1;
+
+  if (n === 3) {
+    if (nextBtn) { nextBtn.textContent = 'Start Crawling'; nextBtn.style.display = ''; }
+    if (downloadBtn) downloadBtn.style.display = 'none';
+    if (selectAllWrap) selectAllWrap.style.display = 'none';
+  } else if (n === 4) {
+    if (nextBtn) nextBtn.style.display = 'none';
+    if (downloadBtn) downloadBtn.style.display = '';
+    if (selectAllWrap) selectAllWrap.style.display = grabAssets.size ? '' : 'none';
+  } else {
+    if (nextBtn) { nextBtn.textContent = 'Next'; nextBtn.style.display = ''; }
+    if (downloadBtn) downloadBtn.style.display = 'none';
+    if (selectAllWrap) selectAllWrap.style.display = 'none';
+  }
+}
+
+function openGrabberWizard() {
+  grabAssets.clear();
+  grabSelected.clear();
+  const projectName = document.getElementById('grab-project-name');
+  const startUrl = document.getElementById('grab-start-url');
+  const saveDir = document.getElementById('grab-save-dir');
+  const sameOrigin = document.getElementById('grab-same-origin');
+  const depth0 = document.querySelector('input[name="grab-depth"][value="0"]');
+  const filterAll = document.querySelector('input[name="grab-filter"][value="All"]');
+  if (projectName) projectName.value = '';
+  if (startUrl) startUrl.value = '';
+  if (saveDir) saveDir.value = '';
+  if (sameOrigin) sameOrigin.checked = true;
+  if (depth0) depth0.checked = true;
+  if (filterAll) filterAll.checked = true;
+  const tree = document.getElementById('grab-tree');
+  if (tree) tree.innerHTML = '';
+  const statusText = document.getElementById('grab-status-text');
+  if (statusText) statusText.textContent = 'Ready to start crawling…';
+  const countText = document.getElementById('grab-count-text');
+  if (countText) countText.textContent = '';
+  goToGrabStep(1);
+  if (grabberModal) grabberModal.classList.remove('hidden');
+}
+
+function closeGrabberWizard() {
+  if (window.api.cancelGrabber) window.api.cancelGrabber();
+  if (grabberModal) grabberModal.classList.add('hidden');
+}
+
+async function startGrabberCrawl() {
+  grabAssets.clear();
+  grabSelected.clear();
+  const tree = document.getElementById('grab-tree');
+  if (tree) tree.innerHTML = '';
+  const statusText = document.getElementById('grab-status-text');
+  if (statusText) statusText.textContent = 'Crawling…';
+  const countText = document.getElementById('grab-count-text');
+  if (countText) countText.textContent = '';
+  const selectAllWrap = document.getElementById('grab-select-all-wrap');
+  if (selectAllWrap) selectAllWrap.style.display = 'none';
+
+  const depthEl = document.querySelector('input[name="grab-depth"]:checked');
+  const filterEl = document.querySelector('input[name="grab-filter"]:checked');
+  const opts = {
+    targetUrl: (document.getElementById('grab-start-url')?.value || '').trim(),
+    maxDepth: depthEl ? Number(depthEl.value) : 0,
+    filterCategory: filterEl ? filterEl.value : 'All',
+    sameOriginOnly: document.getElementById('grab-same-origin')?.checked !== false,
+  };
+
+  if (window.api.startGrabber) {
+    const res = await window.api.startGrabber(opts);
+    if (!res || !res.started) {
+      if (statusText) statusText.textContent = (res && res.error) || 'Failed to start crawl.';
+    }
+  }
+}
+
+function renderGrabTree() {
+  const tree = document.getElementById('grab-tree');
+  if (!tree) return;
+
+  const groups = { Images: [], 'Video/Audio': [], Documents: [], Other: [] };
+  for (const asset of grabAssets.values()) {
+    (groups[asset.category] || (groups[asset.category] = [])).push(asset);
+  }
+
+  tree.innerHTML = '';
+  let anyGroup = false;
+  for (const [cat, list] of Object.entries(groups)) {
+    if (!list.length) continue;
+    anyGroup = true;
+
+    const groupEl = document.createElement('div');
+    groupEl.className = 'grab-group';
+
+    const selectedInGroup = list.filter((a) => grabSelected.has(a.url)).length;
+    const header = document.createElement('div');
+    header.className = 'grab-group-header';
+    header.innerHTML = `
+      <input type="checkbox" class="grab-group-check" ${selectedInGroup === list.length ? 'checked' : ''} />
+      <span class="grab-group-title">${escapeHtml(cat)}</span>
+      <span class="grab-group-count">${list.length}</span>
+    `;
+    const groupCheck = header.querySelector('.grab-group-check');
+    groupCheck.addEventListener('change', () => {
+      for (const a of list) {
+        if (groupCheck.checked) grabSelected.add(a.url);
+        else grabSelected.delete(a.url);
+      }
+      renderGrabTree();
+    });
+    groupEl.appendChild(header);
+
+    const itemsWrap = document.createElement('div');
+    itemsWrap.className = 'grab-group-items';
+    for (const asset of list) {
+      const row = document.createElement('label');
+      row.className = 'grab-item';
+      const checked = grabSelected.has(asset.url);
+      row.innerHTML = `
+        <input type="checkbox" class="grab-item-check" ${checked ? 'checked' : ''} />
+        <span class="grab-item-name" title="${escapeHtml(asset.url)}">${escapeHtml(asset.filename)}</span>
+        <span class="grab-item-badge">${escapeHtml((asset.kind || 'file').toUpperCase())}</span>
+      `;
+      const cb = row.querySelector('.grab-item-check');
+      cb.addEventListener('change', () => {
+        if (cb.checked) grabSelected.add(asset.url);
+        else grabSelected.delete(asset.url);
+        renderGrabTree();
+      });
+      itemsWrap.appendChild(row);
+    }
+    groupEl.appendChild(itemsWrap);
+    tree.appendChild(groupEl);
+  }
+
+  if (!anyGroup) {
+    tree.innerHTML = '<div class="grab-empty">No files discovered yet…</div>';
+  }
+
+  const countText = document.getElementById('grab-count-text');
+  if (countText) countText.textContent = `${grabSelected.size} of ${grabAssets.size} selected`;
+
+  const selectAllWrap = document.getElementById('grab-select-all-wrap');
+  const selectAllCb = document.getElementById('grab-select-all');
+  if (selectAllWrap) selectAllWrap.style.display = grabAssets.size ? '' : 'none';
+  if (selectAllCb) selectAllCb.checked = grabAssets.size > 0 && grabSelected.size === grabAssets.size;
+}
+
+// Coalesce bursts of asset-found events (a busy page can fire dozens within
+// milliseconds) into a single re-render instead of thrashing the DOM per event.
+function scheduleGrabRender() {
+  if (_grabRenderScheduled) return;
+  _grabRenderScheduled = true;
+  setTimeout(() => {
+    _grabRenderScheduled = false;
+    renderGrabTree();
+  }, 80);
+}
+
+document.getElementById('dd-run-grabber')?.addEventListener('click', openGrabberWizard);
+document.getElementById('grabber-close')?.addEventListener('click', closeGrabberWizard);
+document.getElementById('grab-cancel-btn')?.addEventListener('click', closeGrabberWizard);
+
+document.getElementById('grab-next-btn')?.addEventListener('click', () => {
+  if (grabStep === 1) {
+    const url = (document.getElementById('grab-start-url')?.value || '').trim();
+    if (!/^https?:\/\//i.test(url)) {
+      alert('Enter a valid http:// or https:// start page URL.');
+      return;
+    }
+    goToGrabStep(2);
+  } else if (grabStep === 2) {
+    goToGrabStep(3);
+  } else if (grabStep === 3) {
+    goToGrabStep(4);
+    startGrabberCrawl();
+  }
+});
+
+document.getElementById('grab-back-btn')?.addEventListener('click', () => {
+  if (grabStep === 4 && window.api.cancelGrabber) window.api.cancelGrabber();
+  if (grabStep > 1) goToGrabStep(grabStep - 1);
+});
+
+document.getElementById('grab-browse-btn')?.addEventListener('click', async () => {
+  if (!window.api.pickDestDir) return;
+  const dir = await window.api.pickDestDir();
+  if (dir) {
+    const el = document.getElementById('grab-save-dir');
+    if (el) el.value = dir;
+  }
+});
+
+document.getElementById('grab-select-all')?.addEventListener('change', (e) => {
+  if (e.target.checked) {
+    for (const url of grabAssets.keys()) grabSelected.add(url);
+  } else {
+    grabSelected.clear();
+  }
+  renderGrabTree();
+});
+
+document.getElementById('grab-download-btn')?.addEventListener('click', () => {
+  const destDir = (document.getElementById('grab-save-dir')?.value || '').trim() || undefined;
+  let count = 0;
+  for (const url of grabSelected) {
+    const asset = grabAssets.get(url);
+    if (!asset || !window.api.add) continue;
+    window.api.add({ url: asset.url, kind: asset.kind, suggestedFilename: asset.filename, destDir });
+    count++;
+  }
+  closeGrabberWizard();
+  if (count > 0) alert(`${count} file(s) added to the download queue.`);
+});
+
+if (window.api && window.api.onGrabberAssetFound) {
+  window.api.onGrabberAssetFound((asset) => {
+    grabAssets.set(asset.url, asset);
+    grabSelected.add(asset.url); // default to selected; user can deselect
+    scheduleGrabRender();
+  });
+}
+if (window.api && window.api.onGrabberDone) {
+  window.api.onGrabberDone((result) => {
+    const statusText = document.getElementById('grab-status-text');
+    if (statusText) {
+      const n = (result && result.assets ? result.assets.length : grabAssets.size);
+      statusText.textContent = result && result.cancelled ? 'Crawl cancelled.' : `Crawl complete — ${n} file(s) found.`;
+    }
+    renderGrabTree(); // final, unthrottled render so the last events aren't stuck in the debounce
+  });
+}
+
 const clearDoneBtn = document.getElementById('clear-done-btn');
 if (clearDoneBtn) {
   clearDoneBtn.addEventListener('click', () => {
@@ -983,6 +1301,9 @@ function init() {
         if (item.status !== prevStatus) {
           if (item.status === 'completed' && soundOn('complete')) playSound('complete');
           else if (item.status === 'error' && soundOn('error')) playSound('error');
+          if (item.status === 'completed' && appConfig.showCompleteDialog !== false) {
+            showDownloadCompleteDialog(item);
+          }
         }
         checkQueueComplete();
         render();

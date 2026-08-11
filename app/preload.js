@@ -27,4 +27,10 @@ contextBridge.exposeInMainWorld('api', {
   onItemAdded: (cb) => ipcRenderer.on('queue:item-added', (_e, item) => cb(item)),
   onItemUpdated: (cb) => ipcRenderer.on('queue:item-updated', (_e, item) => cb(item)),
   onItemRemoved: (cb) => ipcRenderer.on('queue:item-removed', (_e, info) => cb(info)),
+  startGrabber: (opts) => ipcRenderer.invoke('grabber:start', opts),
+  cancelGrabber: () => ipcRenderer.invoke('grabber:cancel'),
+  onGrabberPageStart: (cb) => ipcRenderer.on('grabber:page-start', (_e, p) => cb(p)),
+  onGrabberAssetFound: (cb) => ipcRenderer.on('grabber:asset-found', (_e, a) => cb(a)),
+  onGrabberPageError: (cb) => ipcRenderer.on('grabber:page-error', (_e, err) => cb(err)),
+  onGrabberDone: (cb) => ipcRenderer.on('grabber:done', (_e, result) => cb(result)),
 });

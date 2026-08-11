@@ -216,6 +216,8 @@ class Manager extends EventEmitter {
       progress: item.progress,
       error: item.error,
       addedAt: item.addedAt,
+      startedAt: item.startedAt ?? null,
+      completedAt: item.completedAt ?? null,
     };
   }
 
@@ -381,6 +383,10 @@ class Manager extends EventEmitter {
       item.filename = info.filename || path.basename(task.destPath || '');
       item.destPath = task.destPath;
       if (info.size != null) item.size = info.size;
+      // Tracks the start of THIS run (reset on every resume) so the completion
+      // dialog's "average speed" reflects actual transfer time, not time spent
+      // sitting paused between resumes.
+      item.startedAt = Date.now();
       this._persistItem(item);
       this.emit('updated', this._publicView(item));
     });
@@ -407,6 +413,7 @@ class Manager extends EventEmitter {
         item.status = 'paused';
       } else {
         item.status = 'completed';
+        item.completedAt = Date.now();
       }
     } catch (err) {
       item.status = 'error';

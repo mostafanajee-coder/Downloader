@@ -7,6 +7,7 @@ const notifier = require('node-notifier');
 const { Manager } = require('../core/Manager');
 const { createBridgeServer } = require('../bridge/server');
 const { ConfigManager } = require('../core/config');
+const { SiteGrabber } = require('../core/siteGrabber');
 
 const userDataDir = app.getPath('userData');
 const stateDir = path.join(userDataDir, 'downloader-state');
@@ -17,6 +18,13 @@ let bridge;
 let mainWindow;
 let tray;
 let config;
+let grabber; // the in-flight SiteGrabber crawl, if any (one at a time)
+
+function sendToWindow(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, payload);
+  }
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -212,6 +220,36 @@ ipcMain.handle('bridge:clientCount', () => {
 ipcMain.handle('dialog:pickDestDir', async () => {
   const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
   return result.canceled ? null : result.filePaths[0];
+});
+
+// --- Site Grabber -----------------------------------------------------------
+// Fire-and-forget: the crawl can take several seconds, so the handler starts
+// it and returns immediately; progress streams to the renderer via events
+// instead of blocking the IPC round trip on the whole crawl.
+ipcMain.handle('grabber:start', (_event, opts) => {
+  if (!opts || !/^https?:\/\//i.test(opts.targetUrl || '')) {
+    return { started: false, error: 'Enter a valid http:// or https:// URL' };
+  }
+  if (grabber) grabber.cancel(); // only one crawl at a time
+
+  const g = new SiteGrabber(opts);
+  grabber = g;
+  g.on('page-start', (p) => sendToWindow('grabber:page-start', p));
+  g.on('asset-found', (a) => sendToWindow('grabber:asset-found', a));
+  g.on('page-error', (e) => sendToWindow('grabber:page-error', e));
+  g.crawl().then((assets) => {
+    // Only report completion if no newer crawl has superseded this one — a
+    // cancelled crawl still resolves its promise, and without this check its
+    // late arrival could send a stray "done" for a crawl the user already
+    // replaced, and/or report the WRONG instance's cancelled flag.
+    if (grabber === g) sendToWindow('grabber:done', { assets, cancelled: g.cancelled });
+  });
+
+  return { started: true };
+});
+
+ipcMain.handle('grabber:cancel', () => {
+  if (grabber) grabber.cancel();
 });
 
 

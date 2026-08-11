@@ -350,6 +350,11 @@
             <label class="opt-check"><input type="checkbox" id="cfg-int-firefox" /> Mozilla Firefox</label>
             <div class="opt-hint">Integration is provided by the IDM Integration extension for each browser.</div>
           </div>
+          <div class="opt-group">
+            <div class="opt-group-title">Notifications</div>
+            <label class="opt-check"><input type="checkbox" id="cfg-show-complete" /> Show the "Download Complete" dialog when a file finishes</label>
+            <div class="opt-hint">If unchecked via the dialog's own "Don't show again", re-enable it here.</div>
+          </div>
         </div>
 
         <!-- CONNECTION -->
@@ -451,6 +456,118 @@
       <div class="dialog-footer">
         <button id="settings-save" class="idm-btn primary">OK</button>
         <button id="settings-cancel" class="idm-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Download Complete Dialog (IDM's signature completion popup) -->
+  <div id="download-complete-modal" class="idm-modal hidden">
+    <div class="idm-dialog" style="width: 440px;">
+      <div class="dialog-header">
+        <span>Download Complete</span>
+        <button id="complete-modal-close" class="dialog-close">&times;</button>
+      </div>
+      <div class="dialog-body">
+        <div class="complete-summary">
+          <div id="complete-file-icon" class="complete-file-icon"></div>
+          <div class="complete-file-info">
+            <div id="complete-filename" class="complete-filename">filename.ext</div>
+            <div class="complete-stat"><span class="complete-stat-label">Size:</span> <span id="complete-size">—</span></div>
+            <div class="complete-stat"><span class="complete-stat-label">Average speed:</span> <span id="complete-speed">—</span></div>
+            <div class="complete-stat"><span class="complete-stat-label">Saved to:</span> <span id="complete-path" class="complete-path"></span></div>
+          </div>
+        </div>
+      </div>
+      <div class="dialog-footer" style="display: flex; justify-content: space-between; align-items: center;">
+        <label class="opt-check" style="margin: 0;"><input type="checkbox" id="complete-dont-show" /> Don't show this dialog again</label>
+        <div style="display: flex; gap: 8px;">
+          <button id="complete-open-file-btn" class="idm-btn primary">Open File</button>
+          <button id="complete-open-folder-btn" class="idm-btn">Open Folder</button>
+          <button id="complete-close-btn" class="idm-btn">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Site Grabber Wizard -->
+  <div id="grabber-modal" class="idm-modal hidden">
+    <div class="idm-dialog idm-wizard" style="width: 640px;">
+      <div class="dialog-header">
+        <span>Site Grabber Wizard</span>
+        <button id="grabber-close" class="dialog-close">&times;</button>
+      </div>
+
+      <div class="wizard-steps">
+        <div class="wizard-step active" data-step="1"><span class="wizard-step-num">1</span> Project</div>
+        <div class="wizard-step" data-step="2"><span class="wizard-step-num">2</span> Save Location</div>
+        <div class="wizard-step" data-step="3"><span class="wizard-step-num">3</span> Depth &amp; Filters</div>
+        <div class="wizard-step" data-step="4"><span class="wizard-step-num">4</span> Discovered Files</div>
+      </div>
+
+      <div class="dialog-body idm-wizard-body">
+        <!-- Step 1: Project Name & Start Page URL -->
+        <div class="wizard-panel active" data-wpanel="1">
+          <div class="opt-group">
+            <div class="opt-group-title">Project Name</div>
+            <input id="grab-project-name" type="text" class="opt-input" placeholder="My Site Project" />
+          </div>
+          <div class="opt-group">
+            <div class="opt-group-title">Start Page URL</div>
+            <input id="grab-start-url" type="text" class="opt-input" placeholder="https://example.com/page" />
+            <div class="opt-hint">The Site Grabber starts crawling from this page.</div>
+          </div>
+        </div>
+
+        <!-- Step 2: Save Location & Explorer options -->
+        <div class="wizard-panel" data-wpanel="2">
+          <div class="opt-group">
+            <div class="opt-group-title">Save files to</div>
+            <div class="opt-row">
+              <input id="grab-save-dir" type="text" class="opt-input" placeholder="Default download folder" />
+              <button id="grab-browse-btn" class="idm-btn dir-browse-btn" data-target="grab-save-dir">Browse...</button>
+            </div>
+          </div>
+          <div class="opt-group">
+            <div class="opt-group-title">Explorer options</div>
+            <label class="opt-check"><input type="checkbox" id="grab-same-origin" checked /> Only follow links within the same website</label>
+            <div class="opt-hint">Keeps the crawl from wandering off to unrelated sites linked from the page.</div>
+          </div>
+        </div>
+
+        <!-- Step 3: Exploration Depth & File Type Filters -->
+        <div class="wizard-panel" data-wpanel="3">
+          <div class="opt-group">
+            <div class="opt-group-title">Exploration depth</div>
+            <label class="opt-check"><input type="radio" name="grab-depth" value="0" checked /> This page only</label>
+            <label class="opt-check"><input type="radio" name="grab-depth" value="1" /> This page and pages linked from it</label>
+          </div>
+          <div class="opt-group">
+            <div class="opt-group-title">File type filter</div>
+            <label class="opt-check"><input type="radio" name="grab-filter" value="Images" /> Images</label>
+            <label class="opt-check"><input type="radio" name="grab-filter" value="Video/Audio" /> Video / Audio</label>
+            <label class="opt-check"><input type="radio" name="grab-filter" value="Documents" /> Documents</label>
+            <label class="opt-check"><input type="radio" name="grab-filter" value="All" checked /> All Files</label>
+          </div>
+        </div>
+
+        <!-- Step 4: Discovered Links (tree/list, multi-select) -->
+        <div class="wizard-panel" data-wpanel="4">
+          <div class="grab-status-row">
+            <span id="grab-status-text">Ready to start crawling…</span>
+            <span id="grab-count-text"></span>
+          </div>
+          <div class="grab-tree" id="grab-tree"></div>
+        </div>
+      </div>
+
+      <div class="dialog-footer" style="display: flex; justify-content: space-between; align-items: center;">
+        <label class="opt-check" id="grab-select-all-wrap" style="margin: 0; display: none;"><input type="checkbox" id="grab-select-all" /> Select All</label>
+        <div style="display: flex; gap: 8px;">
+          <button id="grab-back-btn" class="idm-btn" disabled>Back</button>
+          <button id="grab-next-btn" class="idm-btn primary">Next</button>
+          <button id="grab-download-btn" class="idm-btn primary" style="display: none;">Download Selected</button>
+          <button id="grab-cancel-btn" class="idm-btn">Cancel</button>
+        </div>
       </div>
     </div>
   </div>
