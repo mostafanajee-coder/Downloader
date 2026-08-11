@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('api', {
   onItemAdded: (cb) => ipcRenderer.on('queue:item-added', (_e, item) => cb(item)),
   onItemUpdated: (cb) => ipcRenderer.on('queue:item-updated', (_e, item) => cb(item)),
   onItemRemoved: (cb) => ipcRenderer.on('queue:item-removed', (_e, info) => cb(info)),
+  onDuplicateDetected: (cb) => ipcRenderer.on('queue:duplicate', (_e, info) => cb(info)),
   startGrabber: (opts) => ipcRenderer.invoke('grabber:start', opts),
   cancelGrabber: () => ipcRenderer.invoke('grabber:cancel'),
   onGrabberPageStart: (cb) => ipcRenderer.on('grabber:page-start', (_e, p) => cb(p)),

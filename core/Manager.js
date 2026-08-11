@@ -13,6 +13,8 @@ const { expandBatchUrl } = require('./BatchDownloader');
 const { sanitizeFilename } = require('./filename');
 const { getCategoryForUrl } = require('./categories');
 const { RateLimiter } = require('./rateLimiter');
+const { configureHttp } = require('./httpUtils');
+const { discardWorkspace } = require('./workspace');
 
 const MAX_CONCURRENT_DOWNLOADS = 4;
 
@@ -64,6 +66,7 @@ class Manager extends EventEmitter {
     // Its rate tracks config.speedLimitKBps and is applied to every task.
     this.rateLimiter = new RateLimiter(this._speedLimitBytes());
 
+    this.updateHttpSettings();
     this._loadState();
   }
 
@@ -71,6 +74,14 @@ class Manager extends EventEmitter {
   // Call after the UI changes speedLimitKBps so running downloads adjust live.
   updateSpeedLimit() {
     this.rateLimiter.setRate(this._speedLimitBytes());
+  }
+
+  // Push TLS strictness into the shared HTTP client. Verification stays on
+  // unless the user has explicitly opted out in config.
+  updateHttpSettings() {
+    configureHttp({
+      allowInsecureTLS: this.config ? Boolean(this.config.get('allowInsecureTLS')) : false,
+    });
   }
 
   _isExcluded(urlStr) {
@@ -90,6 +101,37 @@ class Manager extends EventEmitter {
     return false;
   }
 
+  /**
+   * Default connections per download, from Options → Connection.
+   *
+   * This used to be a hardcoded 16 in add()'s signature that no caller ever
+   * overrode, which made the "Default max. connections per download" dropdown
+   * pure decoration. Capped at 32 to match the dropdown's own maximum.
+   */
+  _defaultConnections() {
+    const n = this.config ? Number(this.config.get('maxConnections')) : 0;
+    if (!Number.isFinite(n) || n <= 0) return 8;
+    return Math.min(Math.max(1, Math.floor(n)), 32);
+  }
+
+  /** Configured scratch folder for in-progress downloads (Options → Save To). */
+  _tempDir() {
+    const dir = this.config ? this.config.get('tempDir') : null;
+    return dir && String(dir).trim() ? String(dir).trim() : null;
+  }
+
+  /**
+   * An existing entry for the same URL that still "occupies" that download —
+   * anything not cancelled. A completed item counts: re-adding a file you
+   * already have is exactly the case IDM's duplicate prompt exists for.
+   */
+  _findDuplicate(url) {
+    for (const item of this.items.values()) {
+      if (item.url === url && item.status !== 'cancelled') return item;
+    }
+    return null;
+  }
+
   // Per-download speed cap in bytes/sec, read live from config (0 = unlimited).
   // The UI stores it as KB/s under `speedLimitKBps`; each new download picks up
   // the current value at start time.
@@ -99,12 +141,50 @@ class Manager extends EventEmitter {
     return kbps > 0 ? kbps * 1024 : 0;
   }
 
-  add({ url, kind = 'file', destPath, destDir, headers = {}, connections = 16, variantIndex = 0, suggestedFilename, startNow = true, padWidth }) {
+  add(payload = {}) {
+    const {
+      url,
+      kind = 'file',
+      destPath,
+      destDir,
+      headers = {},
+      connections,
+      variantIndex = 0,
+      suggestedFilename,
+      startNow = true,
+      padWidth,
+      allowDuplicate = false,
+    } = payload;
+
     const urls = expandBatchUrl(url, { padWidth });
     const addedIds = [];
+    // 'ask' | 'skip' | 'allow' — what to do when the same URL is already here.
+    const duplicatePolicy = this.config ? this.config.get('duplicateAction') || 'ask' : 'allow';
+    const effectiveConnections = connections || this._defaultConnections();
 
     for (const singleUrl of urls) {
       if (this._isExcluded(singleUrl)) continue;
+
+      if (!allowDuplicate && duplicatePolicy !== 'allow') {
+        const existing = this._findDuplicate(singleUrl);
+        if (existing) {
+          if (duplicatePolicy === 'skip') {
+            this.emit('duplicate-skipped', { url: singleUrl, existingId: existing.id });
+          } else {
+            // 'ask': the Manager can't put a dialog on screen, and it is reached
+            // from the bridge as well as the UI, so it defers the decision —
+            // whoever is listening prompts and re-adds with allowDuplicate.
+            this.emit('duplicate-detected', {
+              url: singleUrl,
+              existingId: existing.id,
+              existingFilename: existing.filename || null,
+              existingStatus: existing.status,
+              payload: { ...payload, url: singleUrl, allowDuplicate: true },
+            });
+          }
+          continue;
+        }
+      }
 
       const id = crypto.randomUUID();
       const category = getCategoryForUrl(singleUrl, kind, suggestedFilename);
@@ -136,7 +216,7 @@ class Manager extends EventEmitter {
         destPath: destPath || null,
         destDir: finalDestDir,
         headers,
-        connections,
+        connections: effectiveConnections,
         variantIndex,
         suggestedFilename: sanitizeFilename(suggestedFilename, null),
         // held   = in the queue, will NOT start until the queue is started
@@ -210,6 +290,10 @@ class Manager extends EventEmitter {
     const item = this.items.get(id);
     if (!item) return;
     if (item.task) item.task.cancel();
+    // Deleting a half-finished download must also drop its scratch area,
+    // otherwise abandoned partials accumulate in the temp folder forever with
+    // nothing left in the queue pointing at them.
+    if (item.destPath) discardWorkspace({ destPath: item.destPath, tempDir: this._tempDir() });
     this.items.delete(id);
     this._deleteItem(id);
     this.emit('removed', { id });
@@ -371,6 +455,7 @@ class Manager extends EventEmitter {
             headers: item.headers,
             variantIndex: item.variantIndex,
             rateLimiter: this.rateLimiter,
+            tempDir: this._tempDir(),
           }
         : item.kind === 'dash'
         ? {
@@ -379,9 +464,17 @@ class Manager extends EventEmitter {
             headers: item.headers,
             variantIndex: item.variantIndex,
             rateLimiter: this.rateLimiter,
+            tempDir: this._tempDir(),
           }
         : item.destPath
-          ? { url: item.url, destPath: item.destPath, headers: item.headers, connections: item.connections, rateLimiter: this.rateLimiter }
+          ? {
+              url: item.url,
+              destPath: item.destPath,
+              headers: item.headers,
+              connections: item.connections,
+              rateLimiter: this.rateLimiter,
+              tempDir: this._tempDir(),
+            }
           : {
               url: item.url,
               destDir: item.destDir,
@@ -389,6 +482,7 @@ class Manager extends EventEmitter {
               connections: item.connections,
               suggestedFilename: item.suggestedFilename,
               rateLimiter: this.rateLimiter,
+              tempDir: this._tempDir(),
             };
 
     const task = new TaskClass(taskOpts);

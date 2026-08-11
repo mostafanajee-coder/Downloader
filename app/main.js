@@ -7,7 +7,7 @@ const notifier = require('node-notifier');
 const { Manager } = require('../core/Manager');
 const { createBridgeServer } = require('../bridge/server');
 const { ConfigManager } = require('../core/config');
-const { SiteGrabber } = require('../core/siteGrabber');
+const { GrabberHost } = require('../core/grabberHost');
 
 const userDataDir = app.getPath('userData');
 const stateDir = path.join(userDataDir, 'downloader-state');
@@ -70,6 +70,10 @@ function wireManagerEvents() {
   manager.on('updated', (item) => sendToWindow('queue:item-updated', item));
   manager.on('removed', (info) => sendToWindow('queue:item-removed', info));
   manager.on('queue-state', (state) => sendToWindow('queue:state-changed', state));
+  // The Manager can't put a dialog on screen, and duplicate URLs arrive from
+  // the browser extension as well as the UI, so it defers the decision to
+  // whoever is listening. The renderer prompts and re-adds with allowDuplicate.
+  manager.on('duplicate-detected', (info) => sendToWindow('queue:duplicate', info));
 
   const notifiedSet = new Set();
   manager.on('updated', (item) => {
@@ -285,6 +289,7 @@ ipcMain.handle('config:set', (_event, newConfig) => {
   config.setAll(newConfig);
   // Apply the (possibly changed) global speed limit to running downloads live.
   manager.updateSpeedLimit();
+  manager.updateHttpSettings();
 });
 
 ipcMain.handle('shell:openFile', (_event, filePath) => {
@@ -326,18 +331,21 @@ ipcMain.handle('grabber:start', (_event, opts) => {
   }
   if (grabber) grabber.cancel(); // only one crawl at a time
 
-  const g = new SiteGrabber(opts);
+  // The crawl itself runs in a separate process (see core/grabberHost.js), so a
+  // hostile or pathological page can't stall or crash the app — the host turns
+  // any of that into a normal 'done' with an error string.
+  const g = new GrabberHost();
   grabber = g;
   g.on('page-start', (p) => sendToWindow('grabber:page-start', p));
   g.on('asset-found', (a) => sendToWindow('grabber:asset-found', a));
   g.on('page-error', (e) => sendToWindow('grabber:page-error', e));
-  g.crawl().then((assets) => {
+  g.on('done', (result) => {
     // Only report completion if no newer crawl has superseded this one — a
-    // cancelled crawl still resolves its promise, and without this check its
-    // late arrival could send a stray "done" for a crawl the user already
-    // replaced, and/or report the WRONG instance's cancelled flag.
-    if (grabber === g) sendToWindow('grabber:done', { assets, cancelled: g.cancelled });
+    // cancelled crawl still settles, and without this check its late arrival
+    // could send a stray "done" for a crawl the user already replaced.
+    if (grabber === g) sendToWindow('grabber:done', result);
   });
+  g.start(opts);
 
   return { started: true };
 });

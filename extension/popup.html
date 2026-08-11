@@ -45,6 +45,43 @@
       color: white;
       border-color: #5b8cff;
     }
+    .key-select {
+      background: #12151c;
+      color: #eef0f5;
+      border: 1px solid #2a3040;
+      border-radius: 4px;
+      font-size: 11px;
+      padding: 3px 4px;
+    }
+    .key-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 2px 6px;
+      margin: 4px 0 0 18px;
+    }
+    .key-grid label {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .key-grid.disabled {
+      opacity: 0.4;
+      pointer-events: none;
+    }
+    .opt-check {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+    }
+    .hint {
+      color: #8b93a7;
+      font-size: 10px;
+      margin-top: 4px;
+      line-height: 1.35;
+    }
   </style>
 </head>
 <body>
@@ -69,6 +106,47 @@
       <button id="mode-floating-btn" class="mode-btn" title="Show a floating download button over videos on the page">Floating Button</button>
       <button id="mode-sidepanel-btn" class="mode-btn" title="List detected media in the browser's side panel instead">Side Panel</button>
     </div>
+  </div>
+
+  <div class="row" style="margin-top: 12px; border-top: 1px solid #232838; padding-top: 12px;">
+    <div class="section-title">Media Detection</div>
+    <div style="display:flex;align-items:center;gap:6px;margin-top:6px;">
+      <label for="panel-min-size" style="flex:1;">Ignore media smaller than</label>
+      <input type="number" id="panel-min-size" class="key-select" min="0" step="10" style="width:64px;" />
+      <span>KB</span>
+    </div>
+    <div class="hint">0 uses sensible per-format defaults (50 KB audio, 100 KB video). Streams are never filtered by size.</div>
+    <label class="opt-check" style="margin-top:8px;display:block;">
+      <input type="checkbox" id="skip-html" /> Never capture web pages (HTML documents)
+    </label>
+  </div>
+
+  <div class="row" style="margin-top: 12px; border-top: 1px solid #232838; padding-top: 12px;">
+    <div class="section-title">Capture Override Keys</div>
+
+    <label class="opt-check" style="margin-top:6px;display:block;">
+      <input type="checkbox" id="force-enabled" /> Hold to <b>force</b> capture
+    </label>
+    <div class="key-grid" id="force-keys">
+      <label><input type="checkbox" data-key="alt" /> Alt</label>
+      <label><input type="checkbox" data-key="ctrl" /> Ctrl</label>
+      <label><input type="checkbox" data-key="shift" /> Shift</label>
+      <label><input type="checkbox" data-key="ins" /> Insert</label>
+    </div>
+    <div class="hint" id="force-summary"></div>
+
+    <label class="opt-check" style="margin-top:10px;display:block;">
+      <input type="checkbox" id="bypass-enabled" /> Hold to <b>let the browser</b> download
+    </label>
+    <div class="key-grid" id="bypass-keys">
+      <label><input type="checkbox" data-key="alt" /> Alt</label>
+      <label><input type="checkbox" data-key="ctrl" /> Ctrl</label>
+      <label><input type="checkbox" data-key="shift" /> Shift</label>
+      <label><input type="checkbox" data-key="del" /> Delete</label>
+    </div>
+    <div class="hint" id="bypass-summary"></div>
+
+    <div id="capture-keys-warning" style="color:#e0a33a;margin-top:6px;display:none;"></div>
   </div>
 
   <script src="modeToggle.js"></script>

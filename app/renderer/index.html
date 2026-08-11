@@ -255,6 +255,24 @@
     <div class="ctx-item" id="ctx-properties">Properties...</div>
   </div>
 
+  <!-- Duplicate Download Confirmation (IDM asks before queuing the same URL twice) -->
+  <div id="duplicate-modal" class="idm-modal hidden">
+    <div class="idm-dialog" style="width: 460px;">
+      <div class="dialog-header">
+        <span>File is already in the download list</span>
+        <button id="duplicate-close" class="dialog-close">&times;</button>
+      </div>
+      <div class="dialog-body">
+        <p id="duplicate-text" style="margin-bottom: 10px;"></p>
+        <div class="complete-stat"><span class="complete-stat-label">URL:</span> <span id="duplicate-url" class="complete-path"></span></div>
+      </div>
+      <div class="dialog-footer">
+        <button id="duplicate-add-btn" class="idm-btn primary">Download anyway</button>
+        <button id="duplicate-cancel-btn" class="idm-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Add URL Modal -->
   <div id="add-url-modal" class="idm-modal hidden">
     <div class="idm-dialog" style="width: 500px;">
@@ -371,6 +389,14 @@
             <label class="opt-check"><input type="checkbox" id="cfg-int-brave" /> Brave</label>
             <label class="opt-check"><input type="checkbox" id="cfg-int-firefox" /> Mozilla Firefox</label>
             <div class="opt-hint">Integration is provided by the IDM Integration extension for each browser.</div>
+          </div>
+          <div class="opt-group">
+            <div class="opt-group-title">When a download is already in the list</div>
+            <select id="cfg-duplicate-action" class="opt-input" style="max-width:320px;">
+              <option value="ask">Ask me what to do</option>
+              <option value="skip">Skip it — keep the existing download</option>
+              <option value="allow">Add it anyway</option>
+            </select>
           </div>
           <div class="opt-group">
             <div class="opt-group-title">Notifications</div>

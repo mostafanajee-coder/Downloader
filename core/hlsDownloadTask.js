@@ -7,6 +7,7 @@ const { spawn } = require('child_process');
 
 const { resolvePlaylist } = require('./hls');
 const { streamToFile } = require('./streamFile');
+const { resolveWorkspace, finalizeWorkspace } = require('./workspace');
 const speedometer = require('speedometer');
 
 function sleep(ms) {
@@ -35,10 +36,15 @@ class HlsDownloadTask extends EventEmitter {
     retries = 5,
     keepSegments = false,
     rateLimiter = null,
+    tempDir = null,
   }) {
     super();
     this.playlistUrl = playlistUrl;
     this.destPath = destPath;
+    this.tempDir = tempDir || null;
+    this.workPath = null;
+    this.workDir = null;
+    this.usingTemp = false;
     this.headers = headers;
     this.concurrency = concurrency;
     this.variantIndex = variantIndex;
@@ -78,7 +84,15 @@ class HlsDownloadTask extends EventEmitter {
     this.segments = playlist.segments;
     this.mapUri = playlist.mapUri;
 
-    this.segDir = `${this.destPath}.hls_parts`;
+    // Segments, keys, the rewritten local playlist and ffmpeg's output all live
+    // inside the workspace. Previously the scratch folder sat right beside the
+    // finished video as "<name>.hls_parts", so a cancelled stream download left
+    // hundreds of .ts files in the user's Video folder.
+    const workspace = resolveWorkspace({ destPath: this.destPath, tempDir: this.tempDir });
+    this.workPath = workspace.workPath;
+    this.workDir = workspace.workDir;
+    this.usingTemp = workspace.usingTemp;
+    this.segDir = this.usingTemp ? path.join(this.workDir, 'hls_parts') : `${this.destPath}.hls_parts`;
     fs.mkdirSync(this.segDir, { recursive: true });
 
     this.emit('start', { segments: this.segments.length, encrypted: playlist.encrypted });
@@ -106,6 +120,14 @@ class HlsDownloadTask extends EventEmitter {
     await this._remux(localPlaylistPath);
 
     if (!this.keepSegments) this._cleanup();
+    // ffmpeg wrote to the workspace; publish only now that it exited cleanly,
+    // so a failed remux can never leave a broken .mp4 at the destination.
+    finalizeWorkspace({
+      workPath: this.workPath,
+      destPath: this.destPath,
+      workDir: this.workDir,
+      usingTemp: this.usingTemp,
+    });
     this.emit('complete', { destPath: this.destPath });
   }
 
@@ -241,7 +263,7 @@ class HlsDownloadTask extends EventEmitter {
 
   _remux(localPlaylistPath) {
     return new Promise((resolve, reject) => {
-      const args = ['-y', '-f', 'hls', '-allowed_extensions', 'ALL', '-i', localPlaylistPath, '-c', 'copy', this.destPath];
+      const args = ['-y', '-f', 'hls', '-allowed_extensions', 'ALL', '-i', localPlaylistPath, '-c', 'copy', this.workPath];
       const proc = spawn(this.ffmpegPath, args, { cwd: this.segDir });
       let stderr = '';
       proc.stderr.on('data', (d) => {

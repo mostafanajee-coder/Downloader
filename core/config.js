@@ -36,6 +36,10 @@ const DEFAULT_CONFIG = {
   maxConcurrentDownloads: 4,
   speedLimitKBps: 0,
   downloadLimits: false,
+  // Escape hatch for self-signed certificates (a home NAS, a corporate MITM
+  // proxy). Off by default: certificates are verified, because these requests
+  // replay the session cookies the browser extension captured.
+  allowInsecureTLS: false,
   // Sounds tab — play a tone on these events.
   sounds: {
     complete: true,

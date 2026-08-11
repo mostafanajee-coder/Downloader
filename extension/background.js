@@ -241,6 +241,110 @@ function getTabState(tabId) {
   return tabMedia.get(tabId);
 }
 
+// --- Panel filters -----------------------------------------------------------
+// Per-format size floors, below which a media file isn't worth offering. IDM
+// keeps these under DwnlPanel\minsize; the two values a real install ships
+// explicitly (MP3 = 50 KB, OGG = 100 KB) are reproduced exactly and the rest
+// follow the same shape. Without this a 2 KB UI notification sound shows up in
+// the panel as a downloadable "audio file".
+const KB = 1024;
+const DEFAULT_MIN_SIZES = {
+  mp3: 50 * KB,
+  ogg: 100 * KB,
+  m4a: 50 * KB,
+  aac: 50 * KB,
+  opus: 50 * KB,
+  wav: 50 * KB,
+  wma: 50 * KB,
+  flac: 50 * KB,
+  mp4: 100 * KB,
+  m4v: 100 * KB,
+  webm: 100 * KB,
+  mov: 100 * KB,
+  flv: 100 * KB,
+  f4v: 100 * KB,
+  avi: 100 * KB,
+  mkv: 100 * KB,
+  ogv: 100 * KB,
+  '3gp': 100 * KB,
+};
+
+// User-set floor applied on top of the per-format defaults (0 = defaults only),
+// and IDM's SkipHtml, which keeps plain web pages out of the download path.
+let panelMinSizeFloorBytes = 0;
+let skipHtml = true;
+
+function loadPanelSettings() {
+  try {
+    chrome.storage.sync.get(['panelMinSizeKB', 'skipHtml'], (cfg) => {
+      if (chrome.runtime.lastError || !cfg) return;
+      const kb = Number(cfg.panelMinSizeKB);
+      panelMinSizeFloorBytes = Number.isFinite(kb) && kb > 0 ? kb * KB : 0;
+      if (cfg.skipHtml !== undefined) skipHtml = Boolean(cfg.skipHtml);
+    });
+  } catch (e) {
+    /* keep the defaults */
+  }
+}
+loadPanelSettings();
+
+// Settings changed in the popup take effect immediately — the service worker
+// may live for hours, so re-reading only at startup would leave it stale.
+if (chrome.storage && chrome.storage.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'sync') return;
+    if (changes.panelMinSizeKB) {
+      const kb = Number(changes.panelMinSizeKB.newValue);
+      panelMinSizeFloorBytes = Number.isFinite(kb) && kb > 0 ? kb * KB : 0;
+      // Snapshots are cached by version, so raising the floor has to invalidate
+      // them or already-listed small files would linger until the next event.
+      tabSnapshotCache.clear();
+      for (const tabId of tabMedia.keys()) markTabDirty(tabId);
+    }
+    if (changes.skipHtml) skipHtml = Boolean(changes.skipHtml.newValue);
+  });
+}
+
+function fileExtensionOf(url) {
+  const clean = String(url || '').split('?')[0].split('#')[0];
+  const dot = clean.lastIndexOf('.');
+  if (dot === -1) return '';
+  return clean.slice(dot + 1).toLowerCase();
+}
+
+/**
+ * True when a discovered item is too small to be worth showing.
+ *
+ * Deliberately never applies to HLS/DASH: a manifest is a few hundred bytes by
+ * nature while representing an entire movie, so a size floor there would hide
+ * every stream on the page.
+ */
+function isBelowPanelMinSize(url, kind, size) {
+  if (kind === 'hls' || kind === 'dash') return false;
+  if (!Number.isFinite(size) || size <= 0) return false; // unknown size — keep it
+  const perFormat = DEFAULT_MIN_SIZES[fileExtensionOf(url)] || 0;
+  const threshold = Math.max(perFormat, panelMinSizeFloorBytes);
+  return threshold > 0 && size < threshold;
+}
+
+/** A web page rather than a file. IDM calls this SkipHtml, and defaults it on. */
+function isHtmlLike(mimeOrContentType, url) {
+  const m = String(mimeOrContentType || '').toLowerCase().split(';')[0].trim();
+  if (m === 'text/html' || m === 'application/xhtml+xml' || m === 'application/xml+xhtml') return true;
+  // Only fall back to the extension when the server told us nothing at all —
+  // a .html URL that actually serves a file should still be capturable.
+  if (!m) {
+    const ext = fileExtensionOf(url);
+    return ext === 'html' || ext === 'htm' || ext === 'xhtml';
+  }
+  return false;
+}
+
+/** Page navigations are never media, whatever their URL happens to look like. */
+function isNavigationRequest(type) {
+  return type === 'main_frame' || type === 'sub_frame';
+}
+
 // --- Side Panel support: change tracking, session persistence, live push ---
 //
 // The side panel is a long-lived page that can stay open across many tab
@@ -343,6 +447,9 @@ chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (details.tabId < 0) return;
     if (self.shouldExclude && self.shouldExclude(details.url, details.type, details.initiator)) return;
+    // A page navigation is a page, not a download candidate — some sites route
+    // documents through paths like /manifest/ that MEDIA_PATTERN would match.
+    if (skipHtml && isNavigationRequest(details.type)) return;
 
     const state = getTabState(details.tabId);
     if (MEDIA_PATTERN.test(details.url)) {
@@ -372,13 +479,23 @@ chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
     if (details.tabId < 0) return;
     if (self.shouldExclude && self.shouldExclude(details.url, details.type, details.initiator)) return;
+    if (skipHtml && isNavigationRequest(details.type)) return;
 
     const state = getTabState(details.tabId);
+    const header = (name) => details.responseHeaders?.find((h) => h.name.toLowerCase() === name)?.value;
+    const contentType = header('content-type');
     let isMedia = false;
 
-    const contentTypeHeader = details.responseHeaders?.find((h) => h.name.toLowerCase() === 'content-type');
-    if (contentTypeHeader && contentTypeHeader.value) {
-      const val = contentTypeHeader.value.toLowerCase();
+    // A response that turns out to be a web page is never media, even if the
+    // URL matched. Prune it too — onBeforeRequest may already have recorded it
+    // on the strength of the URL alone.
+    if (skipHtml && isHtmlLike(contentType, details.url)) {
+      if (state.manifests.delete(details.url)) markTabDirty(details.tabId);
+      return;
+    }
+
+    if (contentType) {
+      const val = contentType.toLowerCase();
       if (val.startsWith('video/') || val.startsWith('audio/') || MEDIA_CONTENT_TYPES.some((ct) => val.includes(ct))) {
         if (!state.manifests.has(details.url)) {
           state.manifests.add(details.url);
@@ -389,9 +506,27 @@ chrome.webRequest.onHeadersReceived.addListener(
     }
 
     if (isMedia || MEDIA_PATTERN.test(details.url)) {
-      const lengthHeader = details.responseHeaders?.find((h) => h.name.toLowerCase() === 'content-length');
-      if (lengthHeader && lengthHeader.value) {
-        state.sizes.set(details.url, parseInt(lengthHeader.value, 10));
+      // Content-Length on a 206 describes the RANGE, not the file — players
+      // fetch video in small chunks, so trusting it would report a 4 GB movie
+      // as 64 KB and then let the size filter throw it away. The total after
+      // the slash in Content-Range is the real figure.
+      let total = null;
+      const contentRange = header('content-range');
+      const rangeTotal = contentRange && /\/(\d+)\s*$/.exec(contentRange);
+      if (rangeTotal) {
+        total = parseInt(rangeTotal[1], 10);
+      } else if (details.statusCode !== 206) {
+        const len = header('content-length');
+        if (len) total = parseInt(len, 10);
+      }
+
+      if (Number.isFinite(total) && total > 0) {
+        state.sizes.set(details.url, total);
+        // Now that the real size is known, a file below the floor can be
+        // dropped at the source rather than filtered on every snapshot.
+        if (isBelowPanelMinSize(details.url, 'file', total) && state.manifests.delete(details.url)) {
+          markTabDirty(details.tabId);
+        }
       }
     }
   },
@@ -403,13 +538,37 @@ chrome.webRequest.onHeadersReceived.addListener(
 
 const recentlyForwarded = new Set();
 
+// The most recent click's modifier state, reported by content.js. A
+// DownloadItem carries no tabId, so this can't be scoped per-tab — it's a
+// short-lived global hint instead, valid only for downloads that follow the
+// click closely enough to plausibly be that click's.
+const CAPTURE_HINT_TTL_MS = 4000;
+let captureHint = { force: false, bypass: false, ts: 0 };
+
+function currentCaptureHint() {
+  if (Date.now() - captureHint.ts > CAPTURE_HINT_TTL_MS) return { force: false, bypass: false };
+  return captureHint;
+}
+
 chrome.downloads.onCreated.addListener(async (item) => {
   if (recentlyForwarded.has(item.url)) {
     recentlyForwarded.delete(item.url);
     return;
   }
   if (!nativeReady) return;
-  if (self.shouldExclude && self.shouldExclude(item.url)) return;
+
+  const hint = currentCaptureHint();
+  // Bypass wins over force: it's the "just let the browser do it" escape hatch,
+  // and it must work even on a URL we would normally take.
+  if (hint.bypass) return;
+  // Saving a web page (Ctrl+S, or a link the server answers with a document)
+  // should stay with the browser — hijacking it hands the user a raw .html
+  // file in their downloads folder instead of a saved page. Force still wins,
+  // for the rare case of deliberately grabbing the markup.
+  if (skipHtml && !hint.force && isHtmlLike(item.mime, item.url)) return;
+  // Force overrides the exclusion list — that's the whole point of holding the
+  // key on a site the user has otherwise told us to leave alone.
+  if (!hint.force && self.shouldExclude && self.shouldExclude(item.url)) return;
 
   chrome.downloads.cancel(item.id, () => {
     chrome.downloads.erase({ id: item.id });
@@ -532,6 +691,9 @@ async function buildMediaSnapshot(tabId) {
       }
 
       const size = state && state.sizes.has(mediaUrl) ? state.sizes.get(mediaUrl) : 0;
+      // Second line of defence: a size can arrive after discovery, and the
+      // user can raise the floor at any time, so the snapshot re-checks.
+      if (isBelowPanelMinSize(mediaUrl, kind, size)) continue;
       let sizeStr = '';
       if (size > 1024 * 1024) sizeStr = ` ${(size / 1024 / 1024).toFixed(2)} MB`;
       else if (size > 1024) sizeStr = ` ${Math.round(size / 1024)} KB`;
@@ -664,6 +826,14 @@ chrome.runtime.onConnect.addListener((port) => {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const tabId = sender.tab?.id;
+
+  if (msg.type === 'capture-hint') {
+    // Every mousedown reports its modifier state, so this both sets and clears
+    // the override. Stamped with a time so a stale hint can't leak into an
+    // unrelated download later.
+    captureHint = { force: Boolean(msg.force), bypass: Boolean(msg.bypass), ts: Date.now() };
+    return;
+  }
 
   if (msg.type === 'universal-media-found') {
     if (tabId != null) {

@@ -713,6 +713,7 @@ async function openOptions() {
       setChecked('cfg-int-brave', integ.brave);
       setChecked('cfg-int-firefox', integ.firefox);
       setChecked('cfg-show-complete', cfg.showCompleteDialog !== false);
+      setVal('cfg-duplicate-action', cfg.duplicateAction || 'ask');
 
       // Connection
       if (cfg.connectionType) setVal('cfg-conn-type', cfg.connectionType);
@@ -762,6 +763,7 @@ async function saveOptions() {
         firefox: getChecked('cfg-int-firefox'),
       },
       showCompleteDialog: getChecked('cfg-show-complete'),
+      duplicateAction: getVal('cfg-duplicate-action') || 'ask',
       connectionType: getVal('cfg-conn-type'),
       maxConnections: parseInt(getVal('cfg-max-conn'), 10) || 8,
       maxConcurrentDownloads: parseInt(getVal('cfg-max-simultaneous'), 10) || 4,
@@ -1702,6 +1704,37 @@ function scheduleTableRender() {
   }, 100);
 }
 
+// --- Duplicate download confirmation -----------------------------------------
+// The Manager detects the duplicate but deliberately doesn't decide: the same
+// add() is reached from the browser extension, where there is no dialog to
+// show. It defers here, and a confirmed prompt re-adds with allowDuplicate.
+let pendingDuplicate = null;
+
+function closeDuplicateModal() {
+  pendingDuplicate = null;
+  document.getElementById('duplicate-modal')?.classList.add('hidden');
+}
+
+function showDuplicateModal(info) {
+  if (!info || !info.payload) return;
+  pendingDuplicate = info;
+  const label = info.existingFilename || 'This file';
+  const statusText = info.existingStatus === 'completed' ? 'has already been downloaded' : 'is already in the list';
+  const text = document.getElementById('duplicate-text');
+  if (text) text.textContent = `${label} ${statusText}. Download it again?`;
+  const urlEl = document.getElementById('duplicate-url');
+  if (urlEl) urlEl.textContent = info.url || '';
+  document.getElementById('duplicate-modal')?.classList.remove('hidden');
+}
+
+document.getElementById('duplicate-close')?.addEventListener('click', closeDuplicateModal);
+document.getElementById('duplicate-cancel-btn')?.addEventListener('click', closeDuplicateModal);
+document.getElementById('duplicate-add-btn')?.addEventListener('click', () => {
+  const info = pendingDuplicate;
+  closeDuplicateModal();
+  if (info && window.api.add) window.api.add(info.payload);
+});
+
 // --- Resizable table columns -------------------------------------------------
 // The <colgroup> in index.html is the single source of truth for column
 // geometry (the table is `table-layout: fixed`, so <col> widths drive both the
@@ -1986,6 +2019,10 @@ function init() {
         scheduleTableRender();
       }
     });
+  }
+
+  if (window.api && window.api.onDuplicateDetected) {
+    window.api.onDuplicateDetected(showDuplicateModal);
   }
 
   if (window.api && window.api.onItemRemoved) {

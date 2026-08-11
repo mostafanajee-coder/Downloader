@@ -7,6 +7,7 @@ const { spawn } = require('child_process');
 
 const { request } = require('./httpUtils');
 const { streamToFile } = require('./streamFile');
+const { resolveWorkspace, finalizeWorkspace } = require('./workspace');
 const { parseMpd, selectTracks } = require('./dash');
 const speedometer = require('speedometer');
 
@@ -32,10 +33,15 @@ class DashDownloadTask extends EventEmitter {
     keepSegments = false,
     variantIndex = 0,
     rateLimiter = null,
+    tempDir = null,
   }) {
     super();
     this.mpdUrl = mpdUrl;
     this.destPath = destPath;
+    this.tempDir = tempDir || null;
+    this.workPath = null;
+    this.workDir = null;
+    this.usingTemp = false;
     this.headers = headers;
     this.concurrency = concurrency;
     this.ffmpegPath = ffmpegPath;
@@ -58,7 +64,13 @@ class DashDownloadTask extends EventEmitter {
     this.startTime = Date.now();
     fs.mkdirSync(path.dirname(this.destPath), { recursive: true });
 
-    this.segDir = `${this.destPath}.dash_parts`;
+    // Fragments and ffmpeg's output stay inside the workspace; the destination
+    // only ever receives the finished, muxed file.
+    const workspace = resolveWorkspace({ destPath: this.destPath, tempDir: this.tempDir });
+    this.workPath = workspace.workPath;
+    this.workDir = workspace.workDir;
+    this.usingTemp = workspace.usingTemp;
+    this.segDir = this.usingTemp ? path.join(this.workDir, 'dash_parts') : `${this.destPath}.dash_parts`;
     fs.mkdirSync(this.segDir, { recursive: true });
 
     const manifestText = await this._fetchText(this.mpdUrl);
@@ -105,6 +117,12 @@ class DashDownloadTask extends EventEmitter {
     await this._remux(videoTrack, audioTrack);
 
     if (!this.keepSegments) this._cleanup();
+    finalizeWorkspace({
+      workPath: this.workPath,
+      destPath: this.destPath,
+      workDir: this.workDir,
+      usingTemp: this.usingTemp,
+    });
     this.emit('complete', { destPath: this.destPath });
   }
 
@@ -244,11 +262,11 @@ class DashDownloadTask extends EventEmitter {
           '-map', '0:v:0',
           '-map', '1:a:0',
           '-c', 'copy',
-          this.destPath,
+          this.workPath,
         ];
       } else {
         // Single track may itself carry both streams (single-file on-demand).
-        args = ['-y', '-i', videoTrack, '-c', 'copy', this.destPath];
+        args = ['-y', '-i', videoTrack, '-c', 'copy', this.workPath];
       }
       const proc = spawn(this.ffmpegPath, args);
       let stderr = '';

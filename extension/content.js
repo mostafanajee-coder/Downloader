@@ -369,5 +369,112 @@ document.addEventListener('click', (e) => {
   if (!e.target.closest(`.${MENU_CLASS}`) && !e.target.closest(`.${BTN_CLASS}`)) closeMenus();
 });
 
+// --- Capture modifier keys (IDM's Options → General → Keys) ------------------
+// Hold the "force" combination while clicking a link and the app takes the
+// download even if it wouldn't normally be captured; hold the "bypass"
+// combination and the browser keeps it.
+//
+// IDM models each of these as a set of independent checkboxes plus a master
+// enable (its SpecialKeys registry values are UseKeyToForce/UseKeyToPrevent
+// with AltF/CtrlF/ShiftF/InsF and AltP/CtrlP/ShiftP/DelP), so ALL the ticked
+// keys must be held together — Ctrl+Shift is expressible. A real install ships
+// with force off and Alt-to-bypass on, and those are the defaults here.
+//
+// Alt/Ctrl/Shift come free on the click event. Insert and Delete don't — they
+// aren't modifiers — so their held state is tracked separately.
+const DEFAULT_CAPTURE_KEYS = {
+  force: { enabled: false, alt: false, ctrl: false, shift: false, ins: true },
+  bypass: { enabled: true, alt: true, ctrl: false, shift: false, del: false },
+};
+
+let captureKeys = DEFAULT_CAPTURE_KEYS;
+let insertHeld = false;
+let deleteHeld = false;
+
+// Accepts the older single-key setting so an existing install keeps working
+// after an update instead of silently reverting to defaults.
+function migrateLegacyKeys(cfg) {
+  if (!cfg || (cfg.captureForceKey === undefined && cfg.captureBypassKey === undefined)) return null;
+  const asSpec = (name, isForce) => ({
+    enabled: Boolean(name) && name !== 'None',
+    alt: name === 'Alt',
+    ctrl: name === 'Ctrl',
+    shift: name === 'Shift',
+    [isForce ? 'ins' : 'del']: name === 'Insert' || name === 'Delete',
+  });
+  return {
+    force: asSpec(cfg.captureForceKey, true),
+    bypass: asSpec(cfg.captureBypassKey, false),
+  };
+}
+
+function loadCaptureKeys() {
+  try {
+    chrome.storage.sync.get(['captureKeys', 'captureForceKey', 'captureBypassKey'], (cfg) => {
+      if (chrome.runtime.lastError || !cfg) return;
+      if (cfg.captureKeys && cfg.captureKeys.force && cfg.captureKeys.bypass) {
+        captureKeys = cfg.captureKeys;
+        return;
+      }
+      const migrated = migrateLegacyKeys(cfg);
+      if (migrated) captureKeys = migrated;
+    });
+  } catch (e) {
+    /* keep the defaults */
+  }
+}
+
+/**
+ * Every ticked key must be held at once. An enabled combination with nothing
+ * ticked stays inactive on purpose — otherwise it would fire on every plain
+ * click and silently override capture for the whole browsing session.
+ */
+function comboActive(spec, e) {
+  if (!spec || !spec.enabled) return false;
+  const required = [];
+  if (spec.alt) required.push(Boolean(e && e.altKey));
+  if (spec.ctrl) required.push(Boolean(e && e.ctrlKey));
+  if (spec.shift) required.push(Boolean(e && e.shiftKey));
+  if (spec.ins) required.push(insertHeld);
+  if (spec.del) required.push(deleteHeld);
+  if (!required.length) return false;
+  return required.every(Boolean);
+}
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Insert') insertHeld = true;
+  else if (e.key === 'Delete') deleteHeld = true;
+}, true);
+window.addEventListener('keyup', (e) => {
+  if (e.key === 'Insert') insertHeld = false;
+  else if (e.key === 'Delete') deleteHeld = false;
+}, true);
+// A lost keyup (tab switch, alt-tab) would otherwise leave a key stuck on.
+window.addEventListener('blur', () => {
+  insertHeld = false;
+  deleteHeld = false;
+});
+
+// Reported on every mousedown, not just modified ones: the flag has to be
+// *cleared* by an ordinary click too, or a plain download moments after a
+// modified one would inherit the previous decision.
+document.addEventListener('mousedown', (e) => {
+  const force = comboActive(captureKeys.force, e);
+  const bypass = comboActive(captureKeys.bypass, e);
+  try {
+    chrome.runtime.sendMessage({ type: 'capture-hint', force, bypass });
+  } catch (err) {
+    // Extension context invalidated (reload/update) — nothing to do.
+  }
+}, true);
+
+if (chrome.storage && chrome.storage.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'sync') return;
+    if (changes.captureKeys && changes.captureKeys.newValue) captureKeys = changes.captureKeys.newValue;
+  });
+}
+
+loadCaptureKeys();
 initUiMode();
 new MutationObserver(scan).observe(document.documentElement, { childList: true, subtree: true });

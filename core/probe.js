@@ -2,7 +2,7 @@
 
 const path = require('path');
 const { URL } = require('url');
-const { request } = require('./httpUtils');
+const { request, responseEncoding } = require('./httpUtils');
 
 function extractFilename(contentDisposition, urlStr) {
   if (contentDisposition) {
@@ -30,8 +30,12 @@ async function probe(urlStr, headers = {}) {
   let finalUrl = urlStr;
   let contentType = null;
   let contentDisposition = null;
+  let contentEncoding = null;
 
-  const { res: headRes, finalUrl: headFinalUrl } = await request(urlStr, { method: 'HEAD', headers });
+  // `raw` throughout: the numbers this function returns are used to lay out
+  // byte ranges in the destination file, so they have to describe the bytes as
+  // stored, not a transparently-decoded view of them.
+  const { res: headRes, finalUrl: headFinalUrl } = await request(urlStr, { method: 'HEAD', headers, raw: true });
   headRes.resume();
   finalUrl = headFinalUrl;
 
@@ -40,12 +44,14 @@ async function probe(urlStr, headers = {}) {
     size = headRes.headers['content-length'] ? Number(headRes.headers['content-length']) : null;
     contentType = headRes.headers['content-type'] || null;
     contentDisposition = headRes.headers['content-disposition'] || null;
+    contentEncoding = responseEncoding(headRes);
   }
 
   if (!acceptRanges || size === null) {
     const { res: rangeRes, finalUrl: rangeFinalUrl } = await request(urlStr, {
       method: 'GET',
       headers: { ...headers, Range: 'bytes=0-0' },
+      raw: true,
     });
     rangeRes.resume();
     finalUrl = rangeFinalUrl;
@@ -63,10 +69,22 @@ async function probe(urlStr, headers = {}) {
     }
     contentType = contentType || rangeRes.headers['content-type'] || null;
     contentDisposition = contentDisposition || rangeRes.headers['content-disposition'] || null;
+    contentEncoding = contentEncoding || responseEncoding(rangeRes);
+  }
+
+  // A server that compresses anyway (despite Accept-Encoding: identity)
+  // invalidates both numbers above: Content-Length counts the COMPRESSED bytes,
+  // not what will be written, and byte ranges address compressed offsets.
+  // Reporting that length as the file size is what truncated a 512 KB gzipped
+  // file to 544 bytes and then declared it complete. Fall back to an
+  // unknown-length, non-resumable single stream — slower, but always correct.
+  if (contentEncoding) {
+    size = null;
+    acceptRanges = false;
   }
 
   const filename = extractFilename(contentDisposition, finalUrl);
-  return { size, acceptRanges, filename, finalUrl, contentType };
+  return { size, acceptRanges, filename, finalUrl, contentType, contentEncoding };
 }
 
 module.exports = { probe, extractFilename };
