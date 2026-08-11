@@ -99,7 +99,7 @@ class Manager extends EventEmitter {
     return kbps > 0 ? kbps * 1024 : 0;
   }
 
-  add({ url, kind = 'file', destPath, destDir, headers = {}, connections = 16, variantIndex = 0, suggestedFilename }) {
+  add({ url, kind = 'file', destPath, destDir, headers = {}, connections = 16, variantIndex = 0, suggestedFilename, startNow = true }) {
     const urls = expandBatchUrl(url);
     const addedIds = [];
 
@@ -124,7 +124,9 @@ class Manager extends EventEmitter {
         connections,
         variantIndex,
         suggestedFilename: sanitizeFilename(suggestedFilename, null),
-        status: 'queued', // queued | running | paused | completed | error | cancelled
+        // held   = in the queue, will NOT start until the queue is started
+        // queued = eligible now, waiting for a free concurrency slot
+        status: startNow ? 'queued' : 'held',
         progress: null,
         filename: null,
         error: null,
@@ -136,26 +138,45 @@ class Manager extends EventEmitter {
       this.emit('added', this._publicView(item));
     }
 
-    this._pump();
+    if (startNow) this._pump();
     return addedIds.length === 1 ? addedIds[0] : addedIds;
   }
 
   pause(id) {
     const item = this.items.get(id);
-    if (!item || !item.task) return;
-    item.task.pause();
+    if (!item) return;
+    if (item.task) {
+      item.task.pause();
+      return;
+    }
+    // Not started yet: stopping a waiting item just parks it back in the queue.
+    if (item.status === 'queued') {
+      item.status = 'held';
+      this._persistItem(item);
+      this.emit('updated', this._publicView(item));
+    }
   }
 
   resume(id) {
     const item = this.items.get(id);
     if (!item) return;
-    if (item.status === 'paused' || item.status === 'error') {
+    if (item.status === 'paused' || item.status === 'error' || item.status === 'held') {
       item.status = 'queued';
       item.error = null;
       this._persistItem(item);
       this.emit('updated', this._publicView(item));
       this._pump();
     }
+  }
+
+  /** Park a download in the queue without starting it (IDM "Download Later"). */
+  hold(id) {
+    const item = this.items.get(id);
+    if (!item) return;
+    if (item.status === 'completed' || item.status === 'running') return;
+    item.status = 'held';
+    this._persistItem(item);
+    this.emit('updated', this._publicView(item));
   }
 
   cancel(id) {
@@ -205,17 +226,57 @@ class Manager extends EventEmitter {
     }
   }
 
-  /** Start every queued download subject to the concurrency cap (IDM "Start Queue"). */
-  startAll() {
-    this.resumeAll();
-    this._pump();
-  }
-
-  /** Pause every running download at once (IDM "Stop all" / "Stop Queue"). */
+  /** Pause every running download at once (IDM "Stop all"). */
   pauseAll() {
     for (const item of this.items.values()) {
       if (item.status === 'running' && item.task) item.task.pause();
     }
+  }
+
+  /**
+   * IDM "Start Queue": begin processing the queue. Every held item becomes
+   * eligible and the pump fills all free concurrency slots, in insertion order.
+   */
+  startQueue() {
+    this.queueRunning = true;
+    for (const item of this.items.values()) {
+      if (item.status === 'held' || item.status === 'paused' || item.status === 'error') {
+        item.status = 'queued';
+        item.error = null;
+        this._persistItem(item);
+        this.emit('updated', this._publicView(item));
+      }
+    }
+    this.emit('queue-state', { running: true });
+    this._pump();
+  }
+
+  /**
+   * IDM "Stop Queue": stop processing. Running downloads are paused (progress is
+   * preserved) and anything still waiting drops back to held so the queue does
+   * not creep forward.
+   */
+  stopQueue() {
+    this.queueRunning = false;
+    for (const item of this.items.values()) {
+      if (item.status === 'running' && item.task) {
+        item.task.pause();
+      } else if (item.status === 'queued') {
+        item.status = 'held';
+        this._persistItem(item);
+        this.emit('updated', this._publicView(item));
+      }
+    }
+    this.emit('queue-state', { running: false });
+  }
+
+  /** Back-compat alias: previously "start everything". */
+  startAll() {
+    this.startQueue();
+  }
+
+  isQueueRunning() {
+    return Boolean(this.queueRunning);
   }
 
   /**
@@ -251,18 +312,32 @@ class Manager extends EventEmitter {
     }
   }
 
-  _pump() {
-    if (this.runningCount >= this.maxConcurrentDownloads) return;
-    const next = Array.from(this.items.values()).find((it) => it.status === 'queued');
-    if (!next) return;
+  // Effective concurrency cap (config may override the constructor default).
+  _maxConcurrent() {
+    const fromCfg = this.config ? Number(this.config.get('maxConcurrentDownloads')) : 0;
+    return fromCfg > 0 ? fromCfg : this.maxConcurrentDownloads;
+  }
 
-    this.runningCount++;
-    next.status = 'running';
-    this.emit('updated', this._publicView(next));
-    this._runItem(next).finally(() => {
-      this.runningCount--;
-      this._pump();
-    });
+  /**
+   * Fill every free concurrency slot with waiting ('queued') items, in insertion
+   * order. Loops rather than starting a single item, so adding N downloads at
+   * once actually saturates the cap instead of trickling one at a time.
+   */
+  _pump() {
+    const max = this._maxConcurrent();
+    while (this.runningCount < max) {
+      const next = Array.from(this.items.values()).find((it) => it.status === 'queued');
+      if (!next) return;
+
+      this.runningCount++;
+      next.status = 'running';
+      this._persistItem(next);
+      this.emit('updated', this._publicView(next));
+      this._runItem(next).finally(() => {
+        this.runningCount--;
+        this._pump();
+      });
+    }
   }
 
   async _runItem(item) {

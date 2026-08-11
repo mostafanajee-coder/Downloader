@@ -6,6 +6,12 @@ try {
   console.error('Failed to import exclusions.js', e);
 }
 
+try {
+  importScripts('dashParser.js');
+} catch (e) {
+  console.error('Failed to import dashParser.js', e);
+}
+
 // --- WebSocket Bridge -----------------------------------------------------
 
 let ws = null;
@@ -183,6 +189,26 @@ async function inspectManifestBackground(url) {
   }
 }
 
+// Fetch + parse an MPEG-DASH manifest into its video Representations (see
+// dashParser.js). Race against a timeout so a slow/hanging manifest never
+// blocks the quality menu from opening; the caller falls back to a single
+// generic "MPEG-DASH Stream" entry when this returns no variants.
+async function inspectMpdVariants(url) {
+  try {
+    const fetchPromise = (async () => {
+      const res = await fetch(url);
+      const text = await res.text();
+      if (typeof self.parseMpdVariants !== 'function') return { video: [] };
+      return self.parseMpdVariants(text);
+    })();
+    const timeoutPromise = new Promise((r) => setTimeout(() => r({ video: [] }), 1500));
+    const parsed = await Promise.race([fetchPromise, timeoutPromise]);
+    return parsed.video || [];
+  } catch (e) {
+    return [];
+  }
+}
+
 // --- Track HLS/DASH/subtitle URLs seen per tab ------------------------------
 
 const MEDIA_PATTERN = /(\.(m3u8|mpd|mp4|mkv|webm|avi|mov|flv|wmv|m4v|ogv|3gp|ts|m2ts|mts|vob|divx|f4v|mp3|m4a|aac|flac|wav|ogg|opus|wma|pdf|zip|rar|7z|tar|gz|iso|exe|msi|apk|dmg)(\?|$))|(mime=video)|(mime=audio)|(bytestart=)|(videoplayback)|(video_stream)|(\/hls\/)|(\/dash\/)|(\/manifest\/)|(\/playlist\.|\/master\.)/i;
@@ -349,24 +375,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         seenUrls.add(cleanKey);
 
         if (mediaUrl.includes('.mpd')) {
-          let qualityLabel = 'MPEG-DASH Stream (.mpd)';
-          try {
-            const res = await fetch(mediaUrl);
-            const text = await res.text();
-            const re = /height="(\d+)"/g;
-            let maxH = 0;
-            let m;
-            while ((m = re.exec(text))) {
-               const h = parseInt(m[1], 10);
-               if (h > maxH) maxH = h;
+          // Parse real Representations (resolution + bitrate) instead of just
+          // guessing the max height, and expose one menu entry per quality —
+          // same UX as the HLS master-playlist branch below. variantIndex is
+          // the position in the height-sorted list, matching exactly what
+          // core/dash.js's selectTracks(variantIndex) will pick on the app side.
+          const variants = await inspectMpdVariants(mediaUrl);
+          if (variants.length) {
+            variants.forEach((v, idx) => {
+              const quality = v.height ? `${v.height}p` : v.bandwidth ? `${Math.round(v.bandwidth / 1000)} kbps` : 'Auto';
+              const detail = v.width && v.height ? `${v.width}x${v.height}` : 'DASH';
+              const label = `${titleClean} - ${quality} (${detail})`;
+              if (!seenLabels.has(label)) {
+                seenLabels.add(label);
+                parsedItems.push({ label, kind: 'dash', url: mediaUrl, variantIndex: idx });
+              }
+            });
+          } else {
+            // Manifest fetch/parse failed or timed out, or it has no video
+            // Representations (e.g. audio-only) — still offer a generic entry
+            // so the download isn't silently dropped from the menu.
+            const label = `${titleClean} - MPEG-DASH Stream (.mpd)`;
+            if (!seenLabels.has(label)) {
+              seenLabels.add(label);
+              parsedItems.push({ label, kind: 'dash', url: mediaUrl, variantIndex: 0 });
             }
-            if (maxH > 0) qualityLabel = `${maxH}p (DASH)`;
-          } catch(e) {}
-
-          const label = `${titleClean} - ${qualityLabel}`;
-          if (!seenLabels.has(label)) {
-            seenLabels.add(label);
-            parsedItems.push({ label, kind: 'dash', url: mediaUrl });
           }
           continue;
         }

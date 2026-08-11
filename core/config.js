@@ -33,6 +33,7 @@ const DEFAULT_CONFIG = {
   // Connection tab.
   connectionType: 'High speed (LAN, cable, DSL)',
   maxConnections: 8,
+  maxConcurrentDownloads: 4,
   speedLimitKBps: 0,
   downloadLimits: false,
   // Sounds tab — play a tone on these events.

@@ -59,7 +59,8 @@ function createWindow() {
     forward('queue:item-updated')(payload);
   });
   manager.on('removed', forward('queue:item-removed'));
-  
+  manager.on('queue-state', forward('queue:state-changed'));
+
   const notifiedSet = new Set();
   manager.on('updated', (item) => {
     if (item.status === 'completed' && !notifiedSet.has(item.id)) {
@@ -97,6 +98,9 @@ function createTray() {
 
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Show Internet Download Manager', click: showMainWindow },
+    { type: 'separator' },
+    { label: 'Start Queue', click: () => manager && manager.startQueue() },
+    { label: 'Stop Queue', click: () => manager && manager.stopQueue() },
     { type: 'separator' },
     { label: 'Resume all downloads', click: () => manager && manager.resumeAll() },
     { label: 'Pause all downloads', click: () => manager && manager.pauseAll() },
@@ -181,6 +185,10 @@ ipcMain.handle('queue:pauseAll', () => manager.pauseAll());
 ipcMain.handle('queue:resumeAll', () => manager.resumeAll());
 ipcMain.handle('queue:startAll', () => manager.startAll());
 ipcMain.handle('queue:refreshUrl', (_event, { id, url }) => manager.refreshUrl(id, url));
+ipcMain.handle('queue:hold', (_event, id) => manager.hold(id));
+ipcMain.handle('queue:startQueue', () => manager.startQueue());
+ipcMain.handle('queue:stopQueue', () => manager.stopQueue());
+ipcMain.handle('queue:isQueueRunning', () => manager.isQueueRunning());
 
 ipcMain.handle('config:get', () => config.getAll());
 ipcMain.handle('config:set', (_event, newConfig) => {

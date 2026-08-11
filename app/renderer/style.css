@@ -299,6 +299,38 @@ html, body {
   background: linear-gradient(180deg, #d9a441 0%, #b47b1e 100%);
 }
 
+/* "On Hold" status text — items added to the queue that haven't started */
+.status-held {
+  color: #8fa3c8;
+  font-style: italic;
+}
+
+/* Q column: small dot marking items that belong to the queue (held / eligible-waiting) */
+.q-mark {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #5b8cff;
+}
+
+/* Toolbar Start/Stop Queue buttons reflect whether the queue is running */
+#start-queue-btn.active,
+#stop-queue-btn.active {
+  background: linear-gradient(180deg, #2a6b3f 0%, #1f5230 100%);
+  border: 1px solid #3ad07a;
+}
+
+/* Status bar queue indicator */
+#status-queue.queue-running {
+  color: #3ad07a;
+  font-weight: bold;
+}
+
+#status-queue.queue-stopped {
+  color: #888;
+}
+
 .idm-progress-text {
   position: absolute;
   top: 0;

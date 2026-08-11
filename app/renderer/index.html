@@ -27,6 +27,7 @@
       <div class="idm-dropdown hidden" id="dropdown-file">
         <div class="dd-item" id="dd-stop-sel"><span class="dd-title">Stop download</span></div>
         <div class="dd-item" id="dd-resume-sel"><span class="dd-title">Resume download</span></div>
+        <div class="dd-item" id="dd-hold-sel"><span class="dd-title">Queue for later</span></div>
         <div class="dd-item" id="dd-refresh-url"><span class="dd-title">Refresh download address...</span></div>
         <div class="dd-item" id="dd-redownload"><span class="dd-title">Redownload</span></div>
         <div class="dd-sep"></div>
@@ -47,6 +48,7 @@
         <div class="dd-item" id="dd-speed-limiter"><span class="dd-title">Speed Limiter...</span></div>
         <div class="dd-item" id="dd-scheduler"><span class="dd-title">Scheduler...</span></div>
         <div class="dd-item" id="dd-start-queue"><span class="dd-title">Start Queue</span></div>
+        <div class="dd-item" id="dd-stop-queue"><span class="dd-title">Stop Queue</span></div>
       </div>
     </div>
 
@@ -206,6 +208,8 @@
       <span id="status-active">0 active downloads</span>
       <span class="status-sep">|</span>
       <span id="status-speed">Total speed: 0 B/s</span>
+      <span class="status-sep">|</span>
+      <span id="status-queue" class="queue-stopped">Queue: Stopped</span>
     </div>
     <div class="status-right">
       <span id="status-total">0 items</span>
@@ -219,6 +223,7 @@
     <div class="ctx-sep"></div>
     <div class="ctx-item" id="ctx-resume">Resume Download</div>
     <div class="ctx-item" id="ctx-pause">Stop Download</div>
+    <div class="ctx-item" id="ctx-hold">Queue for Later</div>
     <div class="ctx-item" id="ctx-refresh-url" style="font-weight: bold; color: #60a5fa;">Refresh Download Address</div>
     <div class="ctx-item" id="ctx-redownload">Redownload</div>
     <div class="ctx-sep"></div>
@@ -286,7 +291,7 @@
       <div class="dialog-footer" style="display: flex; justify-content: space-between;">
         <button id="info-start-btn" class="idm-btn primary" style="min-width: 120px;">Start Download</button>
         <div style="display: flex; gap: 8px;">
-          <button id="info-later-btn" class="idm-btn">Download Later</button>
+          <button id="info-later-btn" class="idm-btn" title="Add to the queue without starting; use Start Queue to begin.">Add to Queue</button>
           <button id="info-cancel-btn" class="idm-btn">Cancel</button>
         </div>
       </div>
@@ -376,6 +381,19 @@
               <span style="color:#aab;">KB/s &nbsp; (0 = unlimited)</span>
             </div>
             <div class="opt-hint">Caps the aggregate transfer rate across all active downloads.</div>
+          </div>
+          <div class="opt-group">
+            <div class="opt-group-title">Max simultaneous downloads</div>
+            <select id="cfg-max-simultaneous" class="opt-input" style="max-width:140px;">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4" selected>4 (Recommended)</option>
+              <option value="6">6</option>
+              <option value="8">8</option>
+              <option value="12">12</option>
+            </select>
+            <div class="opt-hint">How many downloads the queue processes at once; the rest wait their turn.</div>
           </div>
         </div>
 

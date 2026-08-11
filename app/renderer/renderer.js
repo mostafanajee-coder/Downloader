@@ -48,6 +48,7 @@ let pendingDownloadUrl = '';
 let pendingRefreshId = null;
 let appConfig = {}; // last-known config (for sound toggles etc.)
 let _prevActive = 0; // active-download count, for queue-complete detection
+let queueRunning = false; // whether Start Queue has been invoked (vs Stop Queue)
 
 // --- Sound events (WebAudio tones; no bundled assets needed) ---
 let _audioCtx = null;
@@ -184,11 +185,13 @@ function render() {
     const isError = item.status === 'error';
     const isRunning = item.status === 'running';
 
+    const isHeld = item.status === 'held';
     let statusText = 'Complete';
     if (isRunning) statusText = 'Downloading';
     else if (item.status === 'paused') statusText = 'Paused';
     else if (isError) statusText = 'Error';
     else if (item.status === 'queued') statusText = 'Queued';
+    else if (isHeld) statusText = 'On Hold';
 
     const ext = (item.filename || '').split('.').pop().toLowerCase();
     const iconSymbol = ext === 'zip' || ext === 'rar' ? '📁' : '🎬';
@@ -201,16 +204,21 @@ function render() {
       statusCell = `<div class="idm-progress" title="${pct.toFixed(1)}%"><div class="idm-progress-fill${
         item.status === 'paused' ? ' paused' : ''
       }" style="width:${pct}%"></div><span class="idm-progress-text">${pct.toFixed(1)}%</span></div>`;
+    } else if (isHeld) {
+      statusCell = `<span class="status-held">${escapeHtml(statusText)}</span>`;
     } else {
       statusCell = escapeHtml(statusText);
     }
+
+    // Q column: mark items that belong to the queue (waiting to start / on hold).
+    const qCell = isHeld || item.status === 'queued' ? '<span class="q-mark" title="In queue"></span>' : '';
 
     tr.innerHTML = `
       <td class="col-name" style="display:flex; align-items:center; gap:6px;">
         <span>${iconSymbol}</span>
         <span style="overflow:hidden; text-overflow:ellipsis;">${escapeHtml(item.filename || item.url)}</span>
       </td>
-      <td class="col-q">Q</td>
+      <td class="col-q">${qCell}</td>
       <td class="col-size">${formatBytes(item.size)}</td>
       <td class="col-status">${statusCell}</td>
       <td class="col-eta">${isRunning && item.progress?.eta ? formatTimeLeft(item.progress.eta) : '—'}</td>
@@ -397,6 +405,7 @@ async function openOptions() {
       if (cfg.connectionType) setVal('cfg-conn-type', cfg.connectionType);
       if (cfg.maxConnections) setVal('cfg-max-conn', String(cfg.maxConnections));
       setVal('cfg-speed-limit', String(cfg.speedLimitKBps || 0));
+      if (cfg.maxConcurrentDownloads) setVal('cfg-max-simultaneous', String(cfg.maxConcurrentDownloads));
 
       // Save To
       setVal('cfg-save-dir', dirs.General || '');
@@ -441,6 +450,7 @@ async function saveOptions() {
       },
       connectionType: getVal('cfg-conn-type'),
       maxConnections: parseInt(getVal('cfg-max-conn'), 10) || 8,
+      maxConcurrentDownloads: parseInt(getVal('cfg-max-simultaneous'), 10) || 4,
       speedLimitKBps: Math.max(0, parseInt(getVal('cfg-speed-limit'), 10) || 0),
       tempDir: getVal('cfg-temp-dir').trim(),
       destDirs,
@@ -510,6 +520,12 @@ document.getElementById('ctx-resume')?.addEventListener('click', () => {
 document.getElementById('ctx-pause')?.addEventListener('click', () => {
   for (const id of selectedIds) {
     if (window.api.pause) window.api.pause(id);
+  }
+});
+
+document.getElementById('ctx-hold')?.addEventListener('click', () => {
+  for (const id of selectedIds) {
+    if (window.api.hold) window.api.hold(id);
   }
 });
 
@@ -585,6 +601,12 @@ document.getElementById('dd-stop-sel')?.addEventListener('click', () => {
 document.getElementById('dd-resume-sel')?.addEventListener('click', () => {
   for (const id of selectedIds) {
     if (window.api.resume) window.api.resume(id);
+  }
+});
+
+document.getElementById('dd-hold-sel')?.addEventListener('click', () => {
+  for (const id of selectedIds) {
+    if (window.api.hold) window.api.hold(id);
   }
 });
 
@@ -679,15 +701,34 @@ if (stopAllBtn) {
 }
 
 // --- Queue controls (Start Queue / Stop Queue) ---
+// True queue model: "Start Queue" promotes every held/paused/error item to
+// running (up to the concurrency cap) and keeps pulling from the queue as
+// slots free up; "Stop Queue" pauses active transfers and parks anything
+// still waiting back on hold so the queue doesn't keep creeping forward.
 function startQueue() {
-  if (window.api.startAll) window.api.startAll();
+  if (window.api.startQueue) window.api.startQueue();
 }
 function stopQueue() {
-  if (window.api.pauseAll) window.api.pauseAll();
+  if (window.api.stopQueue) window.api.stopQueue();
 }
 document.getElementById('start-queue-btn')?.addEventListener('click', startQueue);
 document.getElementById('stop-queue-btn')?.addEventListener('click', stopQueue);
 document.getElementById('dd-start-queue')?.addEventListener('click', startQueue);
+document.getElementById('dd-stop-queue')?.addEventListener('click', stopQueue);
+
+function updateQueueUI(running) {
+  queueRunning = Boolean(running);
+  const startBtn = document.getElementById('start-queue-btn');
+  const stopBtn = document.getElementById('stop-queue-btn');
+  if (startBtn) startBtn.classList.toggle('active', queueRunning);
+  if (stopBtn) stopBtn.classList.toggle('active', !queueRunning);
+  const statusQueue = document.getElementById('status-queue');
+  if (statusQueue) {
+    statusQueue.textContent = `Queue: ${queueRunning ? 'Running' : 'Stopped'}`;
+    statusQueue.classList.toggle('queue-running', queueRunning);
+    statusQueue.classList.toggle('queue-stopped', !queueRunning);
+  }
+}
 
 // --- Scheduler (IDM-style queue start/stop timers) ---
 let scheduleStart = null; // 'HH:MM' or null
@@ -901,6 +942,13 @@ function init() {
 
   if (window.api && window.api.getConfig) {
     window.api.getConfig().then((c) => { appConfig = c || {}; }).catch(() => {});
+  }
+
+  if (window.api && window.api.isQueueRunning) {
+    window.api.isQueueRunning().then(updateQueueUI).catch(() => {});
+  }
+  if (window.api && window.api.onQueueStateChanged) {
+    window.api.onQueueStateChanged((state) => updateQueueUI(state && state.running));
   }
 
   if (window.api && window.api.list) {
