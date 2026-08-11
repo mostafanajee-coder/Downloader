@@ -46,6 +46,45 @@ let selectedIds = new Set();
 let currentCategory = 'all';
 let pendingDownloadUrl = '';
 let pendingRefreshId = null;
+let appConfig = {}; // last-known config (for sound toggles etc.)
+let _prevActive = 0; // active-download count, for queue-complete detection
+
+// --- Sound events (WebAudio tones; no bundled assets needed) ---
+let _audioCtx = null;
+function playTone(freqs, dur = 0.16) {
+  try {
+    _audioCtx = _audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = _audioCtx;
+    let t = ctx.currentTime;
+    for (const f of freqs) {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.22, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      osc.connect(g).connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + dur);
+      t += dur;
+    }
+  } catch (e) {
+    /* audio not available */
+  }
+}
+function playSound(type) {
+  const tones = { complete: [660, 880], error: [320, 200], queueComplete: [660, 880, 1175] };
+  playTone(tones[type] || [660]);
+}
+function soundOn(type) {
+  return Boolean(appConfig.sounds && appConfig.sounds[type]);
+}
+function checkQueueComplete() {
+  const active = Array.from(items.values()).filter((i) => i.status === 'running' || i.status === 'queued').length;
+  if (_prevActive > 0 && active === 0 && soundOn('queueComplete')) playSound('queueComplete');
+  _prevActive = active;
+}
 
 // Ext Category Mapping
 const EXT_CATEGORY = {
@@ -328,43 +367,121 @@ if (deleteBtn) {
   });
 }
 
+// Convenience getters for form elements.
+const $ = (id) => document.getElementById(id);
+const setChecked = (id, v) => { const el = $(id); if (el) el.checked = Boolean(v); };
+const getChecked = (id) => { const el = $(id); return el ? el.checked : false; };
+const setVal = (id, v) => { const el = $(id); if (el) el.value = v == null ? '' : v; };
+const getVal = (id) => { const el = $(id); return el ? el.value : ''; };
+
+const CATEGORY_DIRS = ['Compressed', 'Documents', 'Music', 'Video', 'Programs'];
+
 async function openOptions() {
-  // Load current config into the dialog fields before showing it.
   try {
     if (window.api.getConfig) {
       const cfg = await window.api.getConfig();
-      const connSel = document.getElementById('cfg-max-conn');
-      const saveDir = document.getElementById('cfg-save-dir');
-      const speedLimit = document.getElementById('cfg-speed-limit');
-      if (connSel && cfg.maxConnections) connSel.value = String(cfg.maxConnections);
-      if (saveDir) saveDir.value = (cfg.destDirs && cfg.destDirs.General) || '';
-      if (speedLimit) speedLimit.value = String(cfg.speedLimitKBps || 0);
+      appConfig = cfg || {};
+      const integ = cfg.integration || {};
+      const sounds = cfg.sounds || {};
+      const dirs = cfg.destDirs || {};
+
+      // General
+      setChecked('cfg-startup', cfg.startup);
+      setChecked('cfg-autoclip', cfg.autoClipboard);
+      setChecked('cfg-int-chrome', integ.chrome);
+      setChecked('cfg-int-edge', integ.edge);
+      setChecked('cfg-int-brave', integ.brave);
+      setChecked('cfg-int-firefox', integ.firefox);
+
+      // Connection
+      if (cfg.connectionType) setVal('cfg-conn-type', cfg.connectionType);
+      if (cfg.maxConnections) setVal('cfg-max-conn', String(cfg.maxConnections));
+      setVal('cfg-speed-limit', String(cfg.speedLimitKBps || 0));
+
+      // Save To
+      setVal('cfg-save-dir', dirs.General || '');
+      setVal('cfg-temp-dir', cfg.tempDir || '');
+      for (const cat of CATEGORY_DIRS) setVal(`cfg-dir-${cat}`, dirs[cat] || '');
+
+      // File Types
+      setVal('cfg-file-types', cfg.fileTypes || '');
+      setVal('cfg-excluded', cfg.excludedSites || '');
+
+      // Sounds
+      setChecked('cfg-snd-complete', sounds.complete);
+      setChecked('cfg-snd-error', sounds.error);
+      setChecked('cfg-snd-queue', sounds.queueComplete);
     }
   } catch (e) {
     console.warn('Failed to load config:', e);
   }
+  // Always reset to the first tab when opening.
+  selectTab('general');
   settingsOverlay.classList.remove('hidden');
 }
 
 async function saveOptions() {
   try {
-    const connSel = document.getElementById('cfg-max-conn');
-    const saveDir = document.getElementById('cfg-save-dir');
-    const speedLimit = document.getElementById('cfg-speed-limit');
-    const patch = {};
-    if (connSel) patch.maxConnections = parseInt(connSel.value, 10) || 8;
-    if (speedLimit) patch.speedLimitKBps = Math.max(0, parseInt(speedLimit.value, 10) || 0);
-    if (saveDir && saveDir.value.trim()) {
-      const cfg = window.api.getConfig ? await window.api.getConfig() : {};
-      const destDirs = { ...(cfg.destDirs || {}), General: saveDir.value.trim() };
-      patch.destDirs = destDirs;
+    const cfg = window.api.getConfig ? await window.api.getConfig() : {};
+    const destDirs = { ...(cfg.destDirs || {}) };
+    if (getVal('cfg-save-dir').trim()) destDirs.General = getVal('cfg-save-dir').trim();
+    for (const cat of CATEGORY_DIRS) {
+      const v = getVal(`cfg-dir-${cat}`).trim();
+      if (v) destDirs[cat] = v;
     }
+
+    const patch = {
+      startup: getChecked('cfg-startup'),
+      autoClipboard: getChecked('cfg-autoclip'),
+      integration: {
+        chrome: getChecked('cfg-int-chrome'),
+        edge: getChecked('cfg-int-edge'),
+        brave: getChecked('cfg-int-brave'),
+        firefox: getChecked('cfg-int-firefox'),
+      },
+      connectionType: getVal('cfg-conn-type'),
+      maxConnections: parseInt(getVal('cfg-max-conn'), 10) || 8,
+      speedLimitKBps: Math.max(0, parseInt(getVal('cfg-speed-limit'), 10) || 0),
+      tempDir: getVal('cfg-temp-dir').trim(),
+      destDirs,
+      fileTypes: getVal('cfg-file-types').trim(),
+      excludedSites: getVal('cfg-excluded').trim(),
+      sounds: {
+        complete: getChecked('cfg-snd-complete'),
+        error: getChecked('cfg-snd-error'),
+        queueComplete: getChecked('cfg-snd-queue'),
+      },
+    };
     if (window.api.setConfig) await window.api.setConfig(patch);
+    appConfig = { ...appConfig, ...patch };
   } catch (e) {
     console.warn('Failed to save config:', e);
   }
   settingsOverlay.classList.add('hidden');
 }
+
+function selectTab(name) {
+  document.querySelectorAll('.idm-tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.idm-tab-panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === name));
+}
+
+document.querySelectorAll('.idm-tab').forEach((tab) => {
+  tab.addEventListener('click', () => selectTab(tab.dataset.tab));
+});
+
+// Generic directory picker for every Browse button in the options dialog.
+document.querySelectorAll('.dir-browse-btn').forEach((btn) => {
+  btn.addEventListener('click', async () => {
+    if (!window.api.pickDestDir) return;
+    const dir = await window.api.pickDestDir();
+    if (dir) setVal(btn.dataset.target, dir);
+  });
+});
+
+// Sound test buttons.
+document.querySelectorAll('.snd-test-btn').forEach((btn) => {
+  btn.addEventListener('click', () => playSound(btn.dataset.sound));
+});
 
 if (optionsBtn) optionsBtn.addEventListener('click', openOptions);
 if (settingsClose) settingsClose.addEventListener('click', () => settingsOverlay.classList.add('hidden'));
@@ -639,19 +756,8 @@ if (infoBrowseBtn) {
   });
 }
 
-// --- Browse Button in Options Modal ---
-const cfgBrowseBtn = document.getElementById('cfg-browse-btn');
-if (cfgBrowseBtn) {
-  cfgBrowseBtn.addEventListener('click', async () => {
-    if (window.api.pickDestDir) {
-      const dir = await window.api.pickDestDir();
-      if (dir) {
-        const cfgSaveDir = document.getElementById('cfg-save-dir');
-        if (cfgSaveDir) cfgSaveDir.value = dir;
-      }
-    }
-  });
-}
+// (Options-dialog directory Browse buttons are wired generically via
+// `.dir-browse-btn` above, so no per-button handler is needed here.)
 
 // Sidebar Category Switching
 document.querySelectorAll('.tree-node').forEach((node) => {
@@ -793,12 +899,17 @@ function init() {
   _initialized = true;
   injectIcons();
 
+  if (window.api && window.api.getConfig) {
+    window.api.getConfig().then((c) => { appConfig = c || {}; }).catch(() => {});
+  }
+
   if (window.api && window.api.list) {
     window.api.list().then((list) => {
       items.clear();
       if (Array.isArray(list)) {
         for (const item of list) items.set(item.id, item);
       }
+      _prevActive = Array.from(items.values()).filter((i) => i.status === 'running' || i.status === 'queued').length;
       render();
       updateSidebarBadges();
     }).catch(console.error);
@@ -808,6 +919,7 @@ function init() {
     window.api.onItemAdded((item) => {
       if (item) {
         items.set(item.id, item);
+        checkQueueComplete();
         render();
         updateSidebarBadges();
       }
@@ -817,7 +929,14 @@ function init() {
   if (window.api && window.api.onItemUpdated) {
     window.api.onItemUpdated((item) => {
       if (item) {
+        const prev = items.get(item.id);
+        const prevStatus = prev ? prev.status : null;
         items.set(item.id, item);
+        if (item.status !== prevStatus) {
+          if (item.status === 'completed' && soundOn('complete')) playSound('complete');
+          else if (item.status === 'error' && soundOn('error')) playSound('error');
+        }
+        checkQueueComplete();
         render();
         updateSidebarBadges();
       }
@@ -829,6 +948,9 @@ function init() {
       if (info && info.id) {
         items.delete(info.id);
         selectedIds.delete(info.id);
+        // Recompute the active baseline silently — removing an item must not
+        // be mistaken for the queue finishing.
+        _prevActive = Array.from(items.values()).filter((i) => i.status === 'running' || i.status === 'queued').length;
         render();
         updateSidebarBadges();
       }

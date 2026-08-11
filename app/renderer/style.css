@@ -433,6 +433,127 @@ body.drag-active::after {
   background: linear-gradient(180deg, #1084e3 0%, #0063b1 100%);
 }
 
+/* --- Multi-tab Options dialog --- */
+.idm-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px 8px 0;
+  background: #2b2b2b;
+  border-bottom: 1px solid #444;
+}
+
+.idm-tab {
+  padding: 5px 14px;
+  background: linear-gradient(180deg, #333 0%, #2a2a2a 100%);
+  border: 1px solid #444;
+  border-bottom: none;
+  border-radius: 3px 3px 0 0;
+  color: #bbb;
+  cursor: default;
+  position: relative;
+  top: 1px;
+}
+
+.idm-tab:hover {
+  color: #fff;
+}
+
+.idm-tab.active {
+  background: #2b2b2b;
+  color: #fff;
+  border-color: #555;
+  border-bottom: 1px solid #2b2b2b;
+  font-weight: bold;
+}
+
+.idm-tab-body {
+  height: 340px;
+  overflow-y: auto;
+}
+
+.idm-tab-panel {
+  display: none;
+}
+
+.idm-tab-panel.active {
+  display: block;
+}
+
+.opt-group {
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  padding: 8px 10px 10px;
+  margin-bottom: 12px;
+}
+
+.opt-group-title {
+  color: #9fc3ff;
+  font-weight: bold;
+  margin-bottom: 6px;
+}
+
+.opt-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  cursor: default;
+}
+
+.opt-check input {
+  margin: 0;
+}
+
+.opt-input {
+  width: 100%;
+  padding: 5px 6px;
+  background: #14171f;
+  color: #fff;
+  border: 1px solid #333;
+  border-radius: 2px;
+}
+
+.opt-textarea {
+  min-height: 90px;
+  resize: vertical;
+  font-family: "Consolas", monospace;
+  line-height: 1.4;
+}
+
+.opt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.opt-row .opt-input {
+  flex: 1;
+}
+
+.opt-hint {
+  font-size: 10px;
+  color: #888;
+  margin-top: 5px;
+}
+
+.opt-cat-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 5px;
+}
+
+.opt-cat-name {
+  width: 90px;
+  color: #cfd3dc;
+  flex-shrink: 0;
+}
+
+.opt-cat-row .opt-input {
+  flex: 1;
+}
+
 /* Context Menu */
 .idm-context-menu {
   position: fixed;

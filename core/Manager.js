@@ -285,6 +285,7 @@ class Manager extends EventEmitter {
             mpdUrl: item.url,
             destPath: item.destPath || path.join(item.destDir, `${item.suggestedFilename || item.id}.mp4`),
             headers: item.headers,
+            variantIndex: item.variantIndex,
             rateLimiter: this.rateLimiter,
           }
         : item.destPath

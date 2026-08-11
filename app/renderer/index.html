@@ -313,40 +313,125 @@
     </div>
   </div>
 
-  <!-- Options Overlay Modal -->
+  <!-- Options Overlay Modal (multi-tab IDM configuration) -->
   <div id="settings-overlay" class="idm-modal hidden">
-    <div class="idm-dialog" style="width: 520px;">
+    <div class="idm-dialog idm-options" style="width: 600px;">
       <div class="dialog-header">
         <span>Internet Download Manager Configuration</span>
         <button id="settings-close" class="dialog-close">&times;</button>
       </div>
-      <div class="dialog-body">
-        <div style="margin-bottom: 12px;">
-          <label style="display:block; margin-bottom:6px;">Default Max Connections (Threads):</label>
-          <select id="cfg-max-conn" style="width:100%; padding:6px; background:#14171f; color:#fff; border:1px solid #333;">
-            <option value="1">1</option>
-            <option value="2">2</option>
-            <option value="4">4</option>
-            <option value="8" selected>8 (Recommended)</option>
-            <option value="16">16</option>
-            <option value="32">32 (Maximum Speed)</option>
-          </select>
-        </div>
-        <div style="margin-bottom: 12px;">
-          <label style="display:block; margin-bottom:6px;">Default Save Directory:</label>
-          <div style="display:flex; gap:6px;">
-            <input id="cfg-save-dir" type="text" value="" style="flex:1; padding:6px; background:#14171f; color:#fff; border:1px solid #333;" />
-            <button id="cfg-browse-btn" class="idm-btn">Browse...</button>
+
+      <div class="idm-tabs" role="tablist">
+        <div class="idm-tab active" data-tab="general">General</div>
+        <div class="idm-tab" data-tab="connection">Connection</div>
+        <div class="idm-tab" data-tab="saveto">Save To</div>
+        <div class="idm-tab" data-tab="filetypes">File Types</div>
+        <div class="idm-tab" data-tab="sounds">Sounds</div>
+      </div>
+
+      <div class="dialog-body idm-tab-body">
+        <!-- GENERAL -->
+        <div class="idm-tab-panel active" data-panel="general">
+          <div class="opt-group">
+            <div class="opt-group-title">Startup</div>
+            <label class="opt-check"><input type="checkbox" id="cfg-startup" /> Launch IDM on Windows startup</label>
+            <label class="opt-check"><input type="checkbox" id="cfg-autoclip" /> Monitor the clipboard for downloadable URLs</label>
+          </div>
+          <div class="opt-group">
+            <div class="opt-group-title">Capture downloads from the following browsers</div>
+            <label class="opt-check"><input type="checkbox" id="cfg-int-chrome" /> Google Chrome</label>
+            <label class="opt-check"><input type="checkbox" id="cfg-int-edge" /> Microsoft Edge</label>
+            <label class="opt-check"><input type="checkbox" id="cfg-int-brave" /> Brave</label>
+            <label class="opt-check"><input type="checkbox" id="cfg-int-firefox" /> Mozilla Firefox</label>
+            <div class="opt-hint">Integration is provided by the IDM Integration extension for each browser.</div>
           </div>
         </div>
-        <div>
-          <label style="display:block; margin-bottom:6px;">Speed Limit (KB/s, 0 = unlimited):</label>
-          <input id="cfg-speed-limit" type="number" min="0" step="1" value="0" style="width:100%; padding:6px; background:#14171f; color:#fff; border:1px solid #333;" />
-          <div style="font-size:10px; color:#888; margin-top:4px;">Applies as a global cap across all active downloads.</div>
+
+        <!-- CONNECTION -->
+        <div class="idm-tab-panel" data-panel="connection">
+          <div class="opt-group">
+            <div class="opt-group-title">Connection type / speed</div>
+            <select id="cfg-conn-type" class="opt-input">
+              <option>Dial up modem (9.6-56 Kbs)</option>
+              <option>ISDN/DSL (128 Kbs - 1.5 Mbs)</option>
+              <option>High speed (LAN, cable, DSL)</option>
+              <option>Very high speed (Fiber, LAN 100+ Mbs)</option>
+            </select>
+          </div>
+          <div class="opt-group">
+            <div class="opt-group-title">Default max. connections per download</div>
+            <select id="cfg-max-conn" class="opt-input">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="4">4</option>
+              <option value="8" selected>8 (Recommended)</option>
+              <option value="16">16</option>
+              <option value="32">32 (Maximum Speed)</option>
+            </select>
+          </div>
+          <div class="opt-group">
+            <div class="opt-group-title">Global Speed Limiter</div>
+            <div class="opt-row">
+              <input id="cfg-speed-limit" type="number" min="0" step="1" value="0" class="opt-input" style="max-width:140px;" />
+              <span style="color:#aab;">KB/s &nbsp; (0 = unlimited)</span>
+            </div>
+            <div class="opt-hint">Caps the aggregate transfer rate across all active downloads.</div>
+          </div>
+        </div>
+
+        <!-- SAVE TO -->
+        <div class="idm-tab-panel" data-panel="saveto">
+          <div class="opt-group">
+            <div class="opt-group-title">Default download directory</div>
+            <div class="opt-row">
+              <input id="cfg-save-dir" type="text" value="" class="opt-input" />
+              <button id="cfg-browse-btn" class="idm-btn dir-browse-btn" data-target="cfg-save-dir">Browse...</button>
+            </div>
+          </div>
+          <div class="opt-group">
+            <div class="opt-group-title">Temporary folder (in-progress files)</div>
+            <div class="opt-row">
+              <input id="cfg-temp-dir" type="text" value="" class="opt-input" />
+              <button class="idm-btn dir-browse-btn" data-target="cfg-temp-dir">Browse...</button>
+            </div>
+          </div>
+          <div class="opt-group">
+            <div class="opt-group-title">Category folders</div>
+            <div class="opt-cat-row"><span class="opt-cat-name">Compressed</span><input id="cfg-dir-Compressed" type="text" class="opt-input" /><button class="idm-btn dir-browse-btn" data-target="cfg-dir-Compressed">…</button></div>
+            <div class="opt-cat-row"><span class="opt-cat-name">Documents</span><input id="cfg-dir-Documents" type="text" class="opt-input" /><button class="idm-btn dir-browse-btn" data-target="cfg-dir-Documents">…</button></div>
+            <div class="opt-cat-row"><span class="opt-cat-name">Music</span><input id="cfg-dir-Music" type="text" class="opt-input" /><button class="idm-btn dir-browse-btn" data-target="cfg-dir-Music">…</button></div>
+            <div class="opt-cat-row"><span class="opt-cat-name">Video</span><input id="cfg-dir-Video" type="text" class="opt-input" /><button class="idm-btn dir-browse-btn" data-target="cfg-dir-Video">…</button></div>
+            <div class="opt-cat-row"><span class="opt-cat-name">Programs</span><input id="cfg-dir-Programs" type="text" class="opt-input" /><button class="idm-btn dir-browse-btn" data-target="cfg-dir-Programs">…</button></div>
+          </div>
+        </div>
+
+        <!-- FILE TYPES -->
+        <div class="idm-tab-panel" data-panel="filetypes">
+          <div class="opt-group">
+            <div class="opt-group-title">Automatically start downloading these file types</div>
+            <textarea id="cfg-file-types" class="opt-input opt-textarea" spellcheck="false"></textarea>
+            <div class="opt-hint">Space-separated extensions (e.g. MP4 MKV ZIP PDF). Wildcards like R0* allowed.</div>
+          </div>
+          <div class="opt-group">
+            <div class="opt-group-title">Do not automatically capture downloads from these sites</div>
+            <textarea id="cfg-excluded" class="opt-input opt-textarea" spellcheck="false"></textarea>
+            <div class="opt-hint">Space-separated host patterns (e.g. *.example.com localhost).</div>
+          </div>
+        </div>
+
+        <!-- SOUNDS -->
+        <div class="idm-tab-panel" data-panel="sounds">
+          <div class="opt-group">
+            <div class="opt-group-title">Play a sound when...</div>
+            <div class="opt-row"><label class="opt-check"><input type="checkbox" id="cfg-snd-complete" /> Download completes</label><button class="idm-btn snd-test-btn" data-sound="complete">Test</button></div>
+            <div class="opt-row"><label class="opt-check"><input type="checkbox" id="cfg-snd-error" /> Download fails (error)</label><button class="idm-btn snd-test-btn" data-sound="error">Test</button></div>
+            <div class="opt-row"><label class="opt-check"><input type="checkbox" id="cfg-snd-queue" /> Whole queue completes</label><button class="idm-btn snd-test-btn" data-sound="queueComplete">Test</button></div>
+          </div>
         </div>
       </div>
+
       <div class="dialog-footer">
-        <button id="settings-save" class="idm-btn primary">Save</button>
+        <button id="settings-save" class="idm-btn primary">OK</button>
         <button id="settings-cancel" class="idm-btn">Cancel</button>
       </div>
     </div>

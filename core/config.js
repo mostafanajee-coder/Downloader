@@ -7,6 +7,13 @@ const { app } = require('electron');
 const DEFAULT_CONFIG = {
   startup: false,
   autoClipboard: false,
+  // General tab — browser integration toggles (the extension covers Chromium).
+  integration: {
+    chrome: true,
+    edge: true,
+    firefox: false,
+    brave: false
+  },
   fileTypes: '3GP 7Z AAC ACE AIF APK ARJ ASF AVI BIN BZ2 EXE GZ GZIP IMG ISO LZH M4A M4V MKV MOV MP3 MP4 MPA MPE MPEG MPG MSI MSU OGG OGV PDF PLJ PPS PPT QT R0* R1* RA RAR RM RMVB SEA SIT SITX TAR TIF TIFF WAV WMA WMV Z ZIP 7Z ISO SRT VTT ASS SUB M2TS TS M3U8 M3U WEBM FLV MPD F4M TTML',
   excludedSites: '*.update.microsoft.com download.windowsupdate.com *.download.windowsupdate.com siteseal.thawte.com ecom.cimetz.com *.voice2page.com 192.168.100.148 localhost chatgpt.com chat.openai.com',
   destDirs: {
@@ -17,12 +24,23 @@ const DEFAULT_CONFIG = {
     Programs: path.join(app.getPath('downloads'), 'Programs'),
     Video: path.join(app.getPath('downloads'), 'Video')
   },
+  // Save To tab — temporary folder for in-progress segments/remuxing.
+  tempDir: path.join(app.getPath('temp'), 'IDM_Temp'),
   rememberLast: true,
   showStartDialog: true,
   showCompleteDialog: true,
   duplicateAction: 'ask',
+  // Connection tab.
+  connectionType: 'High speed (LAN, cable, DSL)',
   maxConnections: 8,
+  speedLimitKBps: 0,
   downloadLimits: false,
+  // Sounds tab — play a tone on these events.
+  sounds: {
+    complete: true,
+    error: true,
+    queueComplete: false
+  },
   lastUsedCategory: 'General'
 };
 
