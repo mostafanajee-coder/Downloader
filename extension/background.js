@@ -22,7 +22,7 @@ function connectBridge() {
   if (ws) {
     try { ws.close(); } catch (e) {}
   }
-  
+
   ws = new WebSocket('ws://127.0.0.1:9333');
 
   ws.onopen = () => {
@@ -34,22 +34,26 @@ function connectBridge() {
   ws.onmessage = (event) => {
     let msg;
     try { msg = JSON.parse(event.data); } catch (e) { return; }
-    
+
     if (msg.type === 'hello-ack' || msg.status === 'success' || msg.type === 'queue') {
+      const wasReady = nativeReady;
       nativeReady = true;
       reconnectDelay = 1000;
       chrome.action.setBadgeText({ text: '' });
       if (msg.config) {
         self.serverConfig = msg.config;
       }
+      if (!wasReady) broadcastBridgeStatusToPorts();
     }
   };
 
   ws.onclose = () => {
+    const wasReady = nativeReady;
     nativeReady = false;
     ws = null;
     chrome.action.setBadgeText({ text: '!' });
     chrome.action.setBadgeBackgroundColor({ color: '#e5534b' });
+    if (wasReady) broadcastBridgeStatusToPorts();
     scheduleReconnect();
   };
 
@@ -132,7 +136,7 @@ function cleanMediaTitle(msgTitle, tabTitle, mediaUrl, isHls) {
   }
 
   title = title.replace(/^\(\d+\)\s*/, '');
-  title = title.replace(/[ \t\r\n\u25B6]+/g, ' ').trim();
+  title = title.replace(/[ \t\r\n▶]+/g, ' ').trim();
 
   return title
     .replace(/[-|_]?(مشاهدة|تحميل|اون لاين|فاصل اعلاني|FaselHD|Fasel|شاهد|انمي|مترجم).*/ig, '')
@@ -237,19 +241,102 @@ function getTabState(tabId) {
   return tabMedia.get(tabId);
 }
 
+// --- Side Panel support: change tracking, session persistence, live push ---
+//
+// The side panel is a long-lived page that can stay open across many tab
+// switches and idle minutes, unlike the popup (opened briefly, on demand).
+// Two problems that don't matter for the popup become real for the panel:
+//
+//  1. MV3 service workers are ephemeral — Chrome can terminate this worker
+//     after ~30s of no qualifying activity and restart it fresh on the next
+//     event. The in-memory `tabMedia` Map would silently lose everything
+//     discovered so far. `chrome.storage.session` is the purpose-built fix:
+//     memory-backed (cleared on browser close, unlike `local`) but survives
+//     a service-worker restart (unlike a plain module-level Map).
+//  2. A snapshot of a tab's media is potentially expensive to (re)compute
+//     (it fetches and parses every discovered .m3u8/.mpd). The version-based
+//     cache below avoids redoing that work when nothing has actually changed
+//     since the last computation.
+
+const SESSION_KEY_PREFIX = 'tabMedia:';
+const tabVersions = new Map(); // tabId -> version counter, bumped on any relevant change
+const tabSnapshotCache = new Map(); // tabId -> { version, snapshot: {items, subtitles} }
+
+function persistTabState(tabId, state) {
+  try {
+    chrome.storage.session
+      .set({
+        [SESSION_KEY_PREFIX + tabId]: {
+          manifests: Array.from(state.manifests),
+          subtitles: Array.from(state.subtitles.entries()),
+        },
+      })
+      .catch(() => {});
+  } catch (e) {
+    // storage.session unavailable — live in-memory tracking still works,
+    // it just won't survive a mid-session service-worker restart.
+  }
+}
+
+async function rehydrateFromSession() {
+  try {
+    const all = await chrome.storage.session.get(null);
+    const openTabs = await chrome.tabs.query({});
+    const openTabIds = new Set(openTabs.map((t) => t.id));
+    for (const [key, value] of Object.entries(all)) {
+      if (!key.startsWith(SESSION_KEY_PREFIX)) continue;
+      const tabId = Number(key.slice(SESSION_KEY_PREFIX.length));
+      if (!openTabIds.has(tabId)) {
+        chrome.storage.session.remove(key).catch(() => {});
+        continue;
+      }
+      if (tabMedia.has(tabId)) continue; // fresher in-memory state already exists
+      tabMedia.set(tabId, {
+        manifests: new Set(value.manifests || []),
+        subtitles: new Map(value.subtitles || []),
+        sizes: new Map(),
+      });
+      tabVersions.set(tabId, 1);
+    }
+  } catch (e) {
+    // Nothing to rehydrate, or storage.session isn't available — fine, the
+    // extension continues to work from a clean slate.
+  }
+}
+rehydrateFromSession();
+
+// Single trigger for "something about this tab's media changed": bumps the
+// version (invalidating the snapshot cache), best-effort persists the raw
+// discovered URLs, and schedules a debounced push to any connected panel.
+function markTabDirty(tabId) {
+  tabVersions.set(tabId, (tabVersions.get(tabId) || 0) + 1);
+  const state = tabMedia.get(tabId);
+  if (state) persistTabState(tabId, state);
+  scheduleSnapshotPush(tabId);
+}
+
 // Clear tab captured URLs only on main-frame URL changes
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.url) {
     tabMedia.delete(tabId);
+    tabVersions.delete(tabId);
+    tabSnapshotCache.delete(tabId);
     ytFormats.delete(tabId);
     fbFormats.delete(tabId);
+    chrome.storage.session.remove(SESSION_KEY_PREFIX + tabId).catch(() => {});
+    pushResetToPorts(tabId);
   }
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabMedia.delete(tabId);
+  tabVersions.delete(tabId);
+  tabSnapshotCache.delete(tabId);
   ytFormats.delete(tabId);
   fbFormats.delete(tabId);
+  chrome.storage.session.remove(SESSION_KEY_PREFIX + tabId).catch(() => {});
+  pushResetToPorts(tabId);
+  portsByTab.delete(tabId); // tab is gone for good; no further updates will ever apply
 });
 
 chrome.webRequest.onBeforeRequest.addListener(
@@ -259,7 +346,10 @@ chrome.webRequest.onBeforeRequest.addListener(
 
     const state = getTabState(details.tabId);
     if (MEDIA_PATTERN.test(details.url)) {
-      state.manifests.add(details.url);
+      if (!state.manifests.has(details.url)) {
+        state.manifests.add(details.url);
+        markTabDirty(details.tabId);
+      }
     } else if (SUB_PATTERN.test(details.url) || details.url.includes('/api/timedtext')) {
       if (!state.subtitles.has(details.url)) {
         let label = details.url.split('/').pop().split('?')[0];
@@ -270,6 +360,7 @@ chrome.webRequest.onBeforeRequest.addListener(
            label = `YouTube Subtitle (${lang}${name ? ' - ' + name : ''})`;
         }
         state.subtitles.set(details.url, { url: details.url, label });
+        markTabDirty(details.tabId);
       }
     }
   },
@@ -289,7 +380,10 @@ chrome.webRequest.onHeadersReceived.addListener(
     if (contentTypeHeader && contentTypeHeader.value) {
       const val = contentTypeHeader.value.toLowerCase();
       if (val.startsWith('video/') || val.startsWith('audio/') || MEDIA_CONTENT_TYPES.some((ct) => val.includes(ct))) {
-        state.manifests.add(details.url);
+        if (!state.manifests.has(details.url)) {
+          state.manifests.add(details.url);
+          markTabDirty(details.tabId);
+        }
         isMedia = true;
       }
     }
@@ -333,6 +427,239 @@ chrome.downloads.onCreated.addListener(async (item) => {
   }
 });
 
+// --- Build the display-ready media list for a tab ---------------------------
+// Shared by the on-demand `get-media-for-tab` message (used by the floating
+// button, which already has a `sender.tab`) and the Side Panel's push path
+// (which doesn't — it resolves the title itself via chrome.tabs.get). Backed
+// by a version-based cache so repeated calls for an unchanged tab (e.g. the
+// panel re-subscribing after a tab switch back) skip the fetch/parse work.
+async function buildMediaSnapshot(tabId) {
+  const state = tabId != null ? tabMedia.get(tabId) : null;
+  const currentVersion = tabVersions.get(tabId) || 0;
+  const cached = tabSnapshotCache.get(tabId);
+  if (cached && cached.version === currentVersion) {
+    return cached.snapshot;
+  }
+
+  let tabTitle = '';
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    tabTitle = tab?.title || '';
+  } catch (e) {
+    // Tab may have closed between the triggering event and this call —
+    // proceed with an empty title rather than failing the whole snapshot.
+  }
+
+  const rawManifests = state ? Array.from(state.manifests) : [];
+  const parsedItems = [];
+  const seenUrls = new Set();
+  const seenLabels = new Set();
+
+  for (const mediaUrl of rawManifests) {
+    const titleClean = cleanMediaTitle('', tabTitle, mediaUrl, mediaUrl.includes('.m3u8'));
+    // Deduplicate Instagram/CDN URLs by base path & resolution parameters
+    const cleanKey = mediaUrl.split('?')[0] + (mediaUrl.match(/_(\d+p)_/)?.[1] || '');
+    if (seenUrls.has(cleanKey)) continue;
+    seenUrls.add(cleanKey);
+
+    if (mediaUrl.includes('.mpd')) {
+      // Parse real Representations (resolution + bitrate) instead of just
+      // guessing the max height, and expose one entry per quality — same
+      // logic as the HLS branch below. variantIndex is the position in the
+      // height-sorted list, matching exactly what core/dash.js's
+      // selectTracks(variantIndex) will pick on the app side.
+      const variants = await inspectMpdVariants(mediaUrl);
+      if (variants.length) {
+        variants.forEach((v, idx) => {
+          const quality = v.height ? `${v.height}p` : v.bandwidth ? `${Math.round(v.bandwidth / 1000)} kbps` : 'Auto';
+          const detail = v.width && v.height ? `${v.width}x${v.height}` : 'DASH';
+          const label = `${titleClean} - ${quality} (${detail})`;
+          if (!seenLabels.has(label)) {
+            seenLabels.add(label);
+            parsedItems.push({ label, kind: 'dash', url: mediaUrl, variantIndex: idx });
+          }
+        });
+      } else {
+        // Manifest fetch/parse failed or timed out, or it has no video
+        // Representations (e.g. audio-only) — still offer a generic entry
+        // so the download isn't silently dropped from the list.
+        const label = `${titleClean} - MPEG-DASH Stream (.mpd)`;
+        if (!seenLabels.has(label)) {
+          seenLabels.add(label);
+          parsedItems.push({ label, kind: 'dash', url: mediaUrl, variantIndex: 0 });
+        }
+      }
+      continue;
+    }
+
+    let info = { type: 'media', variants: [] };
+    try {
+      const timeoutPromise = new Promise((r) => setTimeout(() => r({ type: 'media', url: mediaUrl }), 1500));
+      info = await Promise.race([inspectManifestBackground(mediaUrl), timeoutPromise]);
+    } catch (e) {
+      console.error('inspectManifestBackground failed for', mediaUrl, e);
+    }
+
+    if (info.type === 'master' && info.variants.length) {
+      info.variants.forEach((v, idx) => {
+        const label = `${titleClean} - ${v.quality} (${v.resolution || 'HLS'})`;
+        if (!seenLabels.has(label)) {
+          seenLabels.add(label);
+          parsedItems.push({ label, kind: 'hls', url: mediaUrl, variantIndex: idx });
+        }
+      });
+    } else {
+      let kind = 'file';
+      let ext = '.mp4';
+      if (mediaUrl.includes('.m3u8')) {
+        kind = 'hls';
+        ext = '.m3u8';
+      } else if (mediaUrl.includes('.webm')) {
+        ext = '.webm';
+      }
+
+      let qualityLabel = 'Video File';
+      const pMatch = mediaUrl.match(/(\d{3,4}p)/i) || mediaUrl.match(/tag=dash_(\d+p)/i) || mediaUrl.match(/quality_(\d+p)/i);
+      const hdSdMatch = mediaUrl.match(/quality[=_](hd|sd)/i) || mediaUrl.match(/tag=dash_(hd|sd)/i) || mediaUrl.match(/_(hd|sd)\.mp4/i);
+      const resDimensionsMatch = mediaUrl.match(/(\d{3,4})x(\d{3,4})/i);
+
+      if (pMatch) {
+        qualityLabel = `Quality ${pMatch[1].toLowerCase()}${pMatch[1].includes('720') || pMatch[1].includes('1080') ? ' HD' : ''}`;
+      } else if (resDimensionsMatch) {
+        qualityLabel = `Quality ${resDimensionsMatch[2]}p`;
+      } else if (hdSdMatch) {
+        qualityLabel = `Quality ${hdSdMatch[1].toUpperCase()}`;
+      }
+
+      const size = state && state.sizes.has(mediaUrl) ? state.sizes.get(mediaUrl) : 0;
+      let sizeStr = '';
+      if (size > 1024 * 1024) sizeStr = ` ${(size / 1024 / 1024).toFixed(2)} MB`;
+      else if (size > 1024) sizeStr = ` ${Math.round(size / 1024)} KB`;
+
+      const label = `${titleClean} - MP4 File (${qualityLabel})${sizeStr}`;
+      if (!seenLabels.has(label)) {
+        seenLabels.add(label);
+        parsedItems.push({ label, kind, url: mediaUrl, variantIndex: 0 });
+      }
+    }
+  }
+
+  // Append YT formats if any
+  if (tabId != null && ytFormats.has(tabId)) {
+    for (const ytItem of ytFormats.get(tabId).values()) {
+      if (!seenLabels.has(ytItem.label)) {
+        seenLabels.add(ytItem.label);
+        parsedItems.push(ytItem);
+      }
+    }
+  }
+
+  // Append Facebook formats if any
+  if (tabId != null && fbFormats.has(tabId)) {
+    for (const fbItem of fbFormats.get(tabId).values()) {
+      if (!seenLabels.has(fbItem.label)) {
+        seenLabels.add(fbItem.label);
+        parsedItems.push(fbItem);
+      }
+    }
+  }
+
+  const snapshot = {
+    items: parsedItems,
+    subtitles: state ? Array.from(state.subtitles.values()) : [],
+  };
+  tabSnapshotCache.set(tabId, { version: currentVersion, snapshot });
+  return snapshot;
+}
+
+// --- Side Panel: live push over a persistent Port ---------------------------
+// One global panel page (not per-tab chrome.sidePanel.setOptions) tracks
+// whichever tab is active in its own window and subscribes here by tabId.
+const portsByTab = new Map(); // tabId -> Set<Port>
+const pushTimers = new Map(); // tabId -> timeoutId
+
+function removePortFromTab(port, tabId) {
+  if (tabId == null) return;
+  const set = portsByTab.get(tabId);
+  if (!set) return;
+  set.delete(port);
+  if (set.size === 0) portsByTab.delete(tabId);
+}
+
+// Debounces bursts of discovery events (a busy page can fire many webRequest
+// matches within milliseconds) into a single snapshot push. Skips the
+// (potentially expensive) rebuild entirely when no panel is subscribed to
+// this tab, so an unopened panel costs nothing.
+function scheduleSnapshotPush(tabId) {
+  const ports = portsByTab.get(tabId);
+  if (!ports || ports.size === 0) return;
+  if (pushTimers.has(tabId)) return;
+  const timer = setTimeout(async () => {
+    pushTimers.delete(tabId);
+    const currentPorts = portsByTab.get(tabId);
+    if (!currentPorts || currentPorts.size === 0) return;
+    const snapshot = await buildMediaSnapshot(tabId);
+    const payload = { type: 'snapshot', tabId, items: snapshot.items, subtitles: snapshot.subtitles, bridgeConnected: nativeReady };
+    for (const port of currentPorts) {
+      try { port.postMessage(payload); } catch (e) { /* stale port; onDisconnect will clean it up */ }
+    }
+  }, 250);
+  pushTimers.set(tabId, timer);
+}
+
+function pushResetToPorts(tabId) {
+  const ports = portsByTab.get(tabId);
+  if (!ports || ports.size === 0) return;
+  for (const port of ports) {
+    try { port.postMessage({ type: 'reset', tabId }); } catch (e) {}
+  }
+}
+
+function broadcastBridgeStatusToPorts() {
+  for (const ports of portsByTab.values()) {
+    for (const port of ports) {
+      try { port.postMessage({ type: 'bridge-status', bridgeConnected: nativeReady }); } catch (e) {}
+    }
+  }
+}
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'sidepanel') return;
+  let subscribedTabId = null;
+
+  port.onMessage.addListener((msg) => {
+    if (!msg || msg.type !== 'subscribe') return;
+    removePortFromTab(port, subscribedTabId);
+    subscribedTabId = typeof msg.tabId === 'number' ? msg.tabId : null;
+    if (subscribedTabId == null) return;
+
+    if (!portsByTab.has(subscribedTabId)) portsByTab.set(subscribedTabId, new Set());
+    portsByTab.get(subscribedTabId).add(port);
+
+    // Join-in-progress: push the current snapshot immediately instead of
+    // waiting for the next change.
+    buildMediaSnapshot(subscribedTabId).then((snapshot) => {
+      try {
+        port.postMessage({
+          type: 'snapshot',
+          tabId: subscribedTabId,
+          items: snapshot.items,
+          subtitles: snapshot.subtitles,
+          bridgeConnected: nativeReady,
+        });
+      } catch (e) {}
+    });
+  });
+
+  // A `ws`-style EventEmitter isn't in play here (ports don't throw on an
+  // unhandled disconnect), but cleanup is still required to avoid leaking a
+  // dead port's Set entry — same discipline as bridge/server.js's
+  // `ws.on('close', () => clients.delete(ws))` on the desktop app side.
+  port.onDisconnect.addListener(() => {
+    removePortFromTab(port, subscribedTabId);
+  });
+});
+
 // --- Messages from content script & popup ------------------------------------
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -343,7 +670,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const state = getTabState(tabId);
       // Remove range parameters to prevent duplicates for the same file
       const cleanUrl = msg.url.replace(/&range=\d+-\d+/i, '').replace(/&bytestart=\d+/i, '');
-      state.manifests.add(cleanUrl);
+      if (!state.manifests.has(cleanUrl)) {
+        state.manifests.add(cleanUrl);
+        markTabDirty(tabId);
+      }
     }
     return;
   }
@@ -355,130 +685,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const titleClean = cleanMediaTitle('', sender.tab?.title, msg.url, false);
       const label = `${titleClean} - Facebook Video (${msg.quality || 'MP4'})`;
       tabFb.set(msg.url, { label, kind: 'file', url: msg.url, variantIndex: 0 });
+      markTabDirty(tabId);
     }
     return;
   }
 
   if (msg.type === 'get-media-for-tab') {
     (async () => {
-      const state = tabId != null ? tabMedia.get(tabId) : null;
-      const rawManifests = state ? Array.from(state.manifests) : [];
-      const parsedItems = [];
-      const seenUrls = new Set();
-      const seenLabels = new Set();
-
-      for (const mediaUrl of rawManifests) {
-        const titleClean = cleanMediaTitle('', sender.tab?.title, mediaUrl, mediaUrl.includes('.m3u8'));
-        // Deduplicate Instagram/CDN URLs by base path & resolution parameters
-        const cleanKey = mediaUrl.split('?')[0] + (mediaUrl.match(/_(\d+p)_/)?.[1] || '');
-        if (seenUrls.has(cleanKey)) continue;
-        seenUrls.add(cleanKey);
-
-        if (mediaUrl.includes('.mpd')) {
-          // Parse real Representations (resolution + bitrate) instead of just
-          // guessing the max height, and expose one menu entry per quality —
-          // same UX as the HLS master-playlist branch below. variantIndex is
-          // the position in the height-sorted list, matching exactly what
-          // core/dash.js's selectTracks(variantIndex) will pick on the app side.
-          const variants = await inspectMpdVariants(mediaUrl);
-          if (variants.length) {
-            variants.forEach((v, idx) => {
-              const quality = v.height ? `${v.height}p` : v.bandwidth ? `${Math.round(v.bandwidth / 1000)} kbps` : 'Auto';
-              const detail = v.width && v.height ? `${v.width}x${v.height}` : 'DASH';
-              const label = `${titleClean} - ${quality} (${detail})`;
-              if (!seenLabels.has(label)) {
-                seenLabels.add(label);
-                parsedItems.push({ label, kind: 'dash', url: mediaUrl, variantIndex: idx });
-              }
-            });
-          } else {
-            // Manifest fetch/parse failed or timed out, or it has no video
-            // Representations (e.g. audio-only) — still offer a generic entry
-            // so the download isn't silently dropped from the menu.
-            const label = `${titleClean} - MPEG-DASH Stream (.mpd)`;
-            if (!seenLabels.has(label)) {
-              seenLabels.add(label);
-              parsedItems.push({ label, kind: 'dash', url: mediaUrl, variantIndex: 0 });
-            }
-          }
-          continue;
-        }
-
-        let info = { type: 'media', variants: [] };
-        try {
-          const timeoutPromise = new Promise((r) => setTimeout(() => r({ type: 'media', url: mediaUrl }), 1500));
-          info = await Promise.race([inspectManifestBackground(mediaUrl), timeoutPromise]);
-        } catch (e) {
-          console.error('inspectManifestBackground failed for', mediaUrl, e);
-        }
-
-        if (info.type === 'master' && info.variants.length) {
-          info.variants.forEach((v, idx) => {
-            const label = `${titleClean} - ${v.quality} (${v.resolution || 'HLS'})`;
-            if (!seenLabels.has(label)) {
-              seenLabels.add(label);
-              parsedItems.push({ label, kind: 'hls', url: mediaUrl, variantIndex: idx });
-            }
-          });
-        } else {
-          let kind = 'file';
-          let ext = '.mp4';
-          if (mediaUrl.includes('.m3u8')) {
-            kind = 'hls';
-            ext = '.m3u8';
-          } else if (mediaUrl.includes('.webm')) {
-            ext = '.webm';
-          }
-          
-          let qualityLabel = 'Video File';
-          const pMatch = mediaUrl.match(/(\d{3,4}p)/i) || mediaUrl.match(/tag=dash_(\d+p)/i) || mediaUrl.match(/quality_(\d+p)/i);
-          const hdSdMatch = mediaUrl.match(/quality[=_](hd|sd)/i) || mediaUrl.match(/tag=dash_(hd|sd)/i) || mediaUrl.match(/_(hd|sd)\.mp4/i);
-          const resDimensionsMatch = mediaUrl.match(/(\d{3,4})x(\d{3,4})/i);
-
-          if (pMatch) {
-            qualityLabel = `Quality ${pMatch[1].toLowerCase()}${pMatch[1].includes('720') || pMatch[1].includes('1080') ? ' HD' : ''}`;
-          } else if (resDimensionsMatch) {
-            qualityLabel = `Quality ${resDimensionsMatch[2]}p`;
-          } else if (hdSdMatch) {
-            qualityLabel = `Quality ${hdSdMatch[1].toUpperCase()}`;
-          }
-          
-          const size = state && state.sizes.has(mediaUrl) ? state.sizes.get(mediaUrl) : 0;
-          let sizeStr = '';
-          if (size > 1024 * 1024) sizeStr = ` ${(size / 1024 / 1024).toFixed(2)} MB`;
-          else if (size > 1024) sizeStr = ` ${Math.round(size / 1024)} KB`;
-
-          const label = `${titleClean} - MP4 File (${qualityLabel})${sizeStr}`;
-          if (!seenLabels.has(label)) {
-            seenLabels.add(label);
-            parsedItems.push({ label, kind, url: mediaUrl, variantIndex: 0 });
-          }
-        }
-      }
-
-      // Append YT formats if any
-      if (tabId != null && ytFormats.has(tabId)) {
-         for (const ytItem of ytFormats.get(tabId).values()) {
-            if (!seenLabels.has(ytItem.label)) {
-               seenLabels.add(ytItem.label);
-               parsedItems.push(ytItem);
-            }
-         }
-      }
-
-      // Append Facebook formats if any
-      if (tabId != null && fbFormats.has(tabId)) {
-         for (const fbItem of fbFormats.get(tabId).values()) {
-            if (!seenLabels.has(fbItem.label)) {
-               seenLabels.add(fbItem.label);
-               parsedItems.push(fbItem);
-            }
-         }
-      }
-
+      const snapshot = tabId != null ? await buildMediaSnapshot(tabId) : { items: [], subtitles: [] };
       sendResponse({
-        items: parsedItems,
-        subtitles: state ? Array.from(state.subtitles.values()) : [],
+        items: snapshot.items,
+        subtitles: snapshot.subtitles,
         bridgeConnected: nativeReady,
       });
     })();
@@ -494,6 +711,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
      if (!ytFormats.has(tabId)) ytFormats.set(tabId, new Map());
      const tabMap = ytFormats.get(tabId);
+     const sizeBefore = tabMap.size;
 
      formats.forEach(f => {
        if (f.mimeType && f.mimeType.includes('video/')) {
@@ -525,6 +743,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
        }
      });
 
+     if (tabMap.size !== sizeBefore) markTabDirty(tabId);
      return;
   }
 
@@ -575,4 +794,3 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     },
   });
 });
-

@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Media Panel — IDM Integration Twin</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <header class="panel-header">
+    <img id="tab-favicon" class="tab-favicon" alt="" />
+    <div class="tab-info">
+      <div id="tab-title" class="tab-title">No active tab</div>
+      <div id="bridge-status" class="bridge-status bad">Checking app connection…</div>
+    </div>
+  </header>
+
+  <div id="media-list" class="media-list">
+    <div class="empty-state">No media detected yet on this page.</div>
+  </div>
+
+  <div id="subtitles-section" class="subtitles-section hidden">
+    <div class="section-title">Subtitles</div>
+    <div id="subtitles-list"></div>
+  </div>
+
+  <footer class="panel-footer">
+    <div class="section-title">Media Detection Display</div>
+    <div class="mode-row">
+      <button id="mode-floating-btn" class="mode-btn">Floating Button</button>
+      <button id="mode-sidepanel-btn" class="mode-btn">Side Panel</button>
+    </div>
+  </footer>
+
+  <script src="modeToggle.js"></script>
+  <script src="sidepanel.js"></script>
+</body>
+</html>

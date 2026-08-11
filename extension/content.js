@@ -3,6 +3,12 @@
 const BTN_CLASS = 'ddl-float-btn';
 const MENU_CLASS = 'ddl-float-menu';
 
+// When true, the floating overlay is suppressed in favor of the Side Panel
+// (media discovery itself is unaffected — background.js keeps tracking media
+// for every tab regardless of display mode; this only gates whether THIS
+// content script renders its own floating UI on top of the page).
+let sidePanelModeActive = false;
+
 function getPageTitle() {
   let title = '';
   try { title = window.top.document.title; } catch(e) {}
@@ -248,6 +254,7 @@ function positionMenu(menu, btn) {
 }
 
 function attachOverlay(video) {
+  if (sidePanelModeActive) return;
   if (video.dataset.ddlAttached || video.dataset.ddlDismissed) return;
   video.dataset.ddlAttached = '1';
 
@@ -317,9 +324,50 @@ function scan() {
   findVideosRecursive().forEach(attachOverlay);
 }
 
+// Tears down every currently-attached floating button and clears the
+// per-video dataset flags that would otherwise make attachOverlay() skip
+// those videos when the user switches back to Floating Button mode later.
+function removeAllFloatingButtons() {
+  closeMenus();
+  document.querySelectorAll(`.${BTN_CLASS}`).forEach((btn) => btn.remove());
+  findVideosRecursive().forEach((video) => {
+    delete video.dataset.ddlAttached;
+    delete video.dataset.ddlDismissed;
+  });
+}
+
+async function initUiMode() {
+  try {
+    const { uiMode } = await chrome.storage.sync.get('uiMode');
+    sidePanelModeActive = uiMode === 'sidepanel';
+  } catch (e) {
+    sidePanelModeActive = false;
+  }
+  if (sidePanelModeActive) removeAllFloatingButtons();
+  else scan();
+}
+
+// Respects the popup/panel's mode toggle instantly, with no page reload:
+// chrome.storage.onChanged fires in every frame with a listener registered
+// (matters here since manifest.json runs this content script in all_frames).
+if (chrome.storage && chrome.storage.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'sync' || !changes.uiMode) return;
+    sidePanelModeActive = changes.uiMode.newValue === 'sidepanel';
+    if (sidePanelModeActive) {
+      removeAllFloatingButtons();
+    } else {
+      // The MutationObserver below won't refire for videos already sitting
+      // in the DOM unchanged, so switching back needs an explicit re-scan to
+      // reattach buttons to whatever's already on the page.
+      scan();
+    }
+  });
+}
+
 document.addEventListener('click', (e) => {
   if (!e.target.closest(`.${MENU_CLASS}`) && !e.target.closest(`.${BTN_CLASS}`)) closeMenus();
 });
 
-scan();
+initUiMode();
 new MutationObserver(scan).observe(document.documentElement, { childList: true, subtree: true });

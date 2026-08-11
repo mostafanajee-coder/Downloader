@@ -16,3 +16,9 @@ async function refreshStatus() {
 
 refreshBtn.addEventListener('click', refreshStatus);
 refreshStatus();
+
+ddlInitModeToggle({
+  floatingBtnId: 'mode-floating-btn',
+  sidepanelBtnId: 'mode-sidepanel-btn',
+  sectionId: 'mode-toggle-section',
+});

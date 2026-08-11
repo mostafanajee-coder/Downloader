@@ -29,6 +29,22 @@
     #status { margin-top: 12px; font-size: 13px; font-weight: 600; }
     .ok { color: #34d399; }
     .bad { color: #f87171; }
+    .section-title { color: #99a0b2; margin-bottom: 6px; font-size: 12px; }
+    .mode-row { display: flex; gap: 6px; }
+    .mode-btn {
+      flex: 1;
+      margin-top: 0;
+      background: #191d27;
+      border: 1px solid #232838;
+      color: #99a0b2;
+      font-size: 11px;
+      padding: 7px 4px;
+    }
+    .mode-btn.active {
+      background: #5b8cff;
+      color: white;
+      border-color: #5b8cff;
+    }
   </style>
 </head>
 <body>
@@ -46,6 +62,16 @@
   </div>
   <div id="status">Checking connection…</div>
   <button id="refresh">Refresh status</button>
+
+  <div class="row" id="mode-toggle-section" style="margin-top: 14px; border-top: 1px solid #232838; padding-top: 12px;">
+    <div class="section-title">Media Detection Display</div>
+    <div class="mode-row">
+      <button id="mode-floating-btn" class="mode-btn" title="Show a floating download button over videos on the page">Floating Button</button>
+      <button id="mode-sidepanel-btn" class="mode-btn" title="List detected media in the browser's side panel instead">Side Panel</button>
+    </div>
+  </div>
+
+  <script src="modeToggle.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
