@@ -99,8 +99,8 @@ class Manager extends EventEmitter {
     return kbps > 0 ? kbps * 1024 : 0;
   }
 
-  add({ url, kind = 'file', destPath, destDir, headers = {}, connections = 16, variantIndex = 0, suggestedFilename, startNow = true }) {
-    const urls = expandBatchUrl(url);
+  add({ url, kind = 'file', destPath, destDir, headers = {}, connections = 16, variantIndex = 0, suggestedFilename, startNow = true, padWidth }) {
+    const urls = expandBatchUrl(url, { padWidth });
     const addedIds = [];
 
     for (const singleUrl of urls) {

@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('api', {
   onQueueStateChanged: (cb) => ipcRenderer.on('queue:state-changed', (_e, state) => cb(state)),
   openFile: (destPath) => ipcRenderer.invoke('shell:openFile', destPath),
   showInFolder: (destPath) => ipcRenderer.invoke('shell:showInFolder', destPath),
+  deleteFile: (destPath) => ipcRenderer.invoke('shell:deleteFile', destPath),
   getClientCount: () => ipcRenderer.invoke('bridge:clientCount'),
   pickDestDir: () => ipcRenderer.invoke('dialog:pickDestDir'),
   getConfig: () => ipcRenderer.invoke('config:get'),

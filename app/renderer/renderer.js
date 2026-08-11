@@ -311,9 +311,25 @@ if (addConfirmBtn) {
     if (url) {
       addUrlModal.classList.add('hidden');
       urlInput.value = '';
-      showDownloadInfoModal(url);
+      routeUrlToAddFlow(url);
     }
   });
+}
+
+// Insert / Ctrl+V / "Add download from clipboard": pre-fill the Add URL modal
+// with clipboard text and show it, giving a review/edit step before the URL
+// is routed onward (plain download vs. batch wildcard preview).
+function pasteUrlIntoAddModal() {
+  navigator.clipboard
+    .readText()
+    .then((text) => {
+      const trimmed = (text || '').trim();
+      if (trimmed && /^https?:\/\//i.test(trimmed)) {
+        if (urlInput) urlInput.value = trimmed;
+        if (addUrlModal) addUrlModal.classList.remove('hidden');
+      }
+    })
+    .catch((e) => console.warn('Clipboard read failed:', e));
 }
 
 // Download Info Modal Actions
@@ -412,6 +428,42 @@ document.getElementById('complete-dont-show')?.addEventListener('change', (e) =>
   if (window.api.setConfig) window.api.setConfig({ showCompleteDialog: !e.target.checked });
 });
 
+// --- Download Properties Modal ----------------------------------------------
+function showPropertiesModal(item) {
+  if (!item) return;
+  const modal = document.getElementById('properties-modal');
+  if (!modal) return;
+
+  const set = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+  };
+  const downloaded =
+    item.status === 'completed'
+      ? formatBytes(item.size)
+      : item.progress && item.progress.downloaded != null
+        ? formatBytes(item.progress.downloaded)
+        : '—';
+
+  set('prop-filename', item.filename || item.url);
+  set('prop-status', item.status);
+  set('prop-size', formatBytes(item.size));
+  set('prop-downloaded', downloaded);
+  set('prop-category', categoryOf(item));
+  set('prop-added', item.addedAt ? new Date(item.addedAt).toLocaleString() : '—');
+  set('prop-path', item.destPath || '—');
+  set('prop-url', item.url || '—');
+
+  modal.classList.remove('hidden');
+}
+
+function hidePropertiesModal() {
+  document.getElementById('properties-modal')?.classList.add('hidden');
+}
+
+document.getElementById('properties-close')?.addEventListener('click', hidePropertiesModal);
+document.getElementById('properties-close-btn')?.addEventListener('click', hidePropertiesModal);
+
 // Toolbar Action Buttons
 const resumeAllBtn = document.getElementById('resume-all-btn');
 if (resumeAllBtn) {
@@ -431,14 +483,48 @@ if (pauseAllBtn) {
   });
 }
 
+// --- Delete Confirmation Modal ---------------------------------------------
+let pendingDeleteIds = [];
+let pendingDeleteFromDisk = false;
+
+function confirmDelete(ids, fromDisk) {
+  const list = Array.isArray(ids) ? ids.filter(Boolean) : [];
+  if (!list.length) return;
+  pendingDeleteIds = list;
+  pendingDeleteFromDisk = fromDisk;
+  const text = document.getElementById('delete-confirm-text');
+  if (text) {
+    text.textContent = fromDisk
+      ? `Permanently delete ${list.length} file(s) from disk (moved to the Recycle Bin) and remove ${list.length === 1 ? 'it' : 'them'} from the list?`
+      : `Remove ${list.length} item(s) from the list? This will NOT delete the downloaded file(s) from disk.`;
+  }
+  document.getElementById('delete-confirm-modal')?.classList.remove('hidden');
+}
+
+function closeDeleteConfirm() {
+  pendingDeleteIds = [];
+  document.getElementById('delete-confirm-modal')?.classList.add('hidden');
+}
+
+document.getElementById('delete-confirm-close')?.addEventListener('click', closeDeleteConfirm);
+document.getElementById('delete-confirm-cancel-btn')?.addEventListener('click', closeDeleteConfirm);
+document.getElementById('delete-confirm-ok-btn')?.addEventListener('click', async () => {
+  for (const id of pendingDeleteIds) {
+    const item = items.get(id);
+    if (pendingDeleteFromDisk && item && item.destPath && window.api.deleteFile) {
+      await window.api.deleteFile(item.destPath);
+    }
+    if (window.api.remove) window.api.remove(id);
+  }
+  selectedIds.clear();
+  closeDeleteConfirm();
+  render();
+});
+
 const deleteBtn = document.getElementById('delete-btn');
 if (deleteBtn) {
   deleteBtn.addEventListener('click', () => {
-    for (const id of selectedIds) {
-      if (window.api.remove) window.api.remove(id);
-    }
-    selectedIds.clear();
-    render();
+    confirmDelete(Array.from(selectedIds), false);
   });
 }
 
@@ -622,11 +708,11 @@ if (refreshConfirmBtn) {
 }
 
 document.getElementById('ctx-delete')?.addEventListener('click', () => {
-  for (const id of selectedIds) {
-    if (window.api.remove) window.api.remove(id);
-  }
-  selectedIds.clear();
-  render();
+  confirmDelete(Array.from(selectedIds), false);
+});
+
+document.getElementById('ctx-delete-disk')?.addEventListener('click', () => {
+  confirmDelete(Array.from(selectedIds), true);
 });
 
 document.getElementById('ctx-redownload')?.addEventListener('click', () => {
@@ -638,23 +724,12 @@ document.getElementById('ctx-redownload')?.addEventListener('click', () => {
 });
 
 document.getElementById('ctx-properties')?.addEventListener('click', () => {
-  const id = Array.from(selectedIds)[0];
-  const item = items.get(id);
-  if (item) {
-    alert(`File: ${item.filename || item.url}\nStatus: ${item.status}\nSize: ${formatBytes(item.size || item.progress?.total)}\nPath: ${item.destPath || 'N/A'}\nURL: ${item.url}`);
-  }
+  showPropertiesModal(items.get(Array.from(selectedIds)[0]));
 });
 
 // --- Dropdown Menu Item Handlers ---
 // Tasks Menu
-document.getElementById('dd-add-clipboard')?.addEventListener('click', async () => {
-  try {
-    const text = await navigator.clipboard.readText();
-    if (text && text.startsWith('http')) {
-      showDownloadInfoModal(text);
-    }
-  } catch (e) { console.warn('Clipboard read failed:', e); }
-});
+document.getElementById('dd-add-clipboard')?.addEventListener('click', pasteUrlIntoAddModal);
 
 document.getElementById('dd-exit')?.addEventListener('click', () => {
   window.close();
@@ -698,11 +773,11 @@ document.getElementById('dd-redownload')?.addEventListener('click', () => {
 });
 
 document.getElementById('dd-delete')?.addEventListener('click', () => {
-  for (const id of selectedIds) {
-    if (window.api.remove) window.api.remove(id);
-  }
-  selectedIds.clear();
-  render();
+  confirmDelete(Array.from(selectedIds), false);
+});
+
+document.getElementById('dd-delete-disk')?.addEventListener('click', () => {
+  confirmDelete(Array.from(selectedIds), true);
 });
 
 document.getElementById('dd-delete-done')?.addEventListener('click', () => {
@@ -716,11 +791,7 @@ document.getElementById('dd-delete-done')?.addEventListener('click', () => {
 });
 
 document.getElementById('dd-properties')?.addEventListener('click', () => {
-  const id = Array.from(selectedIds)[0];
-  const item = items.get(id);
-  if (item) {
-    alert(`File: ${item.filename || item.url}\nStatus: ${item.status}\nSize: ${formatBytes(item.size || item.progress?.total)}\nPath: ${item.destPath || 'N/A'}\nURL: ${item.url}`);
-  }
+  showPropertiesModal(items.get(Array.from(selectedIds)[0]));
 });
 
 // Downloads Menu
@@ -1088,6 +1159,191 @@ if (window.api && window.api.onGrabberDone) {
   });
 }
 
+// --- Batch Download Modal (wildcard ranges + multiline URL list) -----------
+// expandBatchPattern/expandAllBatchLines deliberately mirror
+// core/BatchDownloader.js's expandBatchUrl — the renderer runs sandboxed
+// (contextIsolation, no Node integration) so it can't require() that module
+// directly. Kept in sync intentionally, same as extension/dashParser.js's
+// relationship to core/dash.js.
+const BATCH_MAX_EXPANSION = 1000;
+
+function kindForBatchUrl(urlStr) {
+  const path = urlStr.split('?')[0].split('#')[0].toLowerCase();
+  if (path.endsWith('.m3u8')) return 'hls';
+  if (path.endsWith('.mpd')) return 'dash';
+  return 'file';
+}
+
+function expandBatchPattern(patternUrl, padWidth) {
+  const numMatch = /\[(\d+)-(\d+)\](?:%0(\d+)d)?/.exec(patternUrl);
+  if (numMatch) {
+    const startNum = parseInt(numMatch[1], 10);
+    const endNum = parseInt(numMatch[2], 10);
+    const inlinePad = numMatch[3] != null ? Number(numMatch[3]) : null;
+    const padLen = padWidth != null ? padWidth : inlinePad != null ? inlinePad : numMatch[1].length;
+    const step = startNum <= endNum ? 1 : -1;
+    const urls = [];
+    let n = 0;
+    for (let i = startNum; (step > 0 ? i <= endNum : i >= endNum) && n < BATCH_MAX_EXPANSION; i += step, n++) {
+      urls.push(patternUrl.replace(numMatch[0], String(i).padStart(padLen, '0')));
+    }
+    return urls;
+  }
+
+  const alphaMatch = /\[([a-zA-Z])-([a-zA-Z])\]/.exec(patternUrl);
+  if (alphaMatch) {
+    const startChar = alphaMatch[1].charCodeAt(0);
+    const endChar = alphaMatch[2].charCodeAt(0);
+    const step = startChar <= endChar ? 1 : -1;
+    const urls = [];
+    for (let i = startChar; step > 0 ? i <= endChar : i >= endChar; i += step) {
+      urls.push(patternUrl.replace(alphaMatch[0], String.fromCharCode(i)));
+    }
+    return urls;
+  }
+
+  return patternUrl.trim() ? [patternUrl.trim()] : [];
+}
+
+function expandAllBatchLines(text, padWidth) {
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const seen = new Set();
+  const urls = [];
+  for (const line of lines) {
+    for (const u of expandBatchPattern(line, padWidth)) {
+      if (!seen.has(u)) {
+        seen.add(u);
+        urls.push(u);
+      }
+    }
+    if (urls.length >= BATCH_MAX_EXPANSION) break;
+  }
+  return urls.slice(0, BATCH_MAX_EXPANSION);
+}
+
+const batchUrls = []; // ordered list of resolved urls from the last preview
+const batchSelected = new Set();
+
+function isWildcardPattern(urlStr) {
+  return /\[[^\]]+\]/.test(urlStr);
+}
+
+function generateBatchPreview() {
+  const text = document.getElementById('batch-urls-input')?.value || '';
+  const padRaw = document.getElementById('batch-pad-width')?.value;
+  const padWidth = padRaw !== '' && padRaw != null ? Number(padRaw) : null;
+  const urls = expandAllBatchLines(text, padWidth);
+  batchUrls.length = 0;
+  batchUrls.push(...urls);
+  batchSelected.clear();
+  for (const u of urls) batchSelected.add(u);
+  renderBatchPreview();
+}
+
+function renderBatchPreview() {
+  const list = document.getElementById('batch-preview-list');
+  if (!list) return;
+  list.innerHTML = '';
+
+  if (!batchUrls.length) {
+    list.innerHTML = '<div class="grab-empty">No URLs generated yet.</div>';
+  } else {
+    for (const url of batchUrls) {
+      const row = document.createElement('label');
+      row.className = 'grab-item';
+      const checked = batchSelected.has(url);
+      row.innerHTML = `
+        <input type="checkbox" class="grab-item-check" ${checked ? 'checked' : ''} />
+        <span class="grab-item-name" title="${escapeHtml(url)}">${escapeHtml(url)}</span>
+        <span class="grab-item-badge">${escapeHtml(kindForBatchUrl(url).toUpperCase())}</span>
+      `;
+      const cb = row.querySelector('.grab-item-check');
+      cb.addEventListener('change', () => {
+        if (cb.checked) batchSelected.add(url);
+        else batchSelected.delete(url);
+        updateBatchCountText();
+        updateBatchSelectAllState();
+      });
+      list.appendChild(row);
+    }
+  }
+
+  const selectAllWrap = document.getElementById('batch-select-all-wrap');
+  if (selectAllWrap) selectAllWrap.style.display = batchUrls.length ? '' : 'none';
+  updateBatchCountText();
+  updateBatchSelectAllState();
+}
+
+function updateBatchCountText() {
+  const countText = document.getElementById('batch-count-text');
+  if (!countText) return;
+  if (!batchUrls.length) {
+    countText.textContent = 'Enter URL pattern(s) above and click "Generate Preview".';
+    return;
+  }
+  const capped = batchUrls.length >= BATCH_MAX_EXPANSION ? ` (capped at ${BATCH_MAX_EXPANSION})` : '';
+  countText.textContent = `${batchSelected.size} of ${batchUrls.length} URL(s) selected${capped}`;
+}
+
+function updateBatchSelectAllState() {
+  const cb = document.getElementById('batch-select-all');
+  if (cb) cb.checked = batchUrls.length > 0 && batchSelected.size === batchUrls.length;
+}
+
+function openBatchModal(prefillText) {
+  const input = document.getElementById('batch-urls-input');
+  if (input) input.value = prefillText || '';
+  const pad = document.getElementById('batch-pad-width');
+  if (pad) pad.value = '';
+  const cat = document.getElementById('batch-category');
+  if (cat) cat.value = 'General';
+  batchUrls.length = 0;
+  batchSelected.clear();
+  renderBatchPreview();
+  document.getElementById('batch-modal')?.classList.remove('hidden');
+  if (prefillText && prefillText.trim()) generateBatchPreview();
+}
+
+function closeBatchModal() {
+  document.getElementById('batch-modal')?.classList.add('hidden');
+}
+
+// A URL typed/pasted with wildcard syntax routes here instead of the plain
+// single-download flow, so the user previews and picks which generated URLs
+// to queue rather than every download silently multiplying behind the scenes.
+function routeUrlToAddFlow(urlStr) {
+  if (isWildcardPattern(urlStr)) openBatchModal(urlStr);
+  else showDownloadInfoModal(urlStr);
+}
+
+document.getElementById('dd-add-batch')?.addEventListener('click', () => openBatchModal(''));
+document.getElementById('batch-close')?.addEventListener('click', closeBatchModal);
+document.getElementById('batch-cancel-btn')?.addEventListener('click', closeBatchModal);
+document.getElementById('batch-preview-btn')?.addEventListener('click', generateBatchPreview);
+
+document.getElementById('batch-select-all')?.addEventListener('change', (e) => {
+  if (e.target.checked) {
+    for (const u of batchUrls) batchSelected.add(u);
+  } else {
+    batchSelected.clear();
+  }
+  renderBatchPreview();
+});
+
+document.getElementById('batch-ok-btn')?.addEventListener('click', () => {
+  const category = document.getElementById('batch-category')?.value;
+  const destDirs = appConfig.destDirs || {};
+  const destDir = category && destDirs[category] ? destDirs[category] : undefined;
+  let count = 0;
+  for (const url of batchSelected) {
+    if (!window.api.add) continue;
+    window.api.add({ url, kind: kindForBatchUrl(url), destDir });
+    count++;
+  }
+  closeBatchModal();
+  if (count > 0) alert(`${count} file(s) added to the download queue.`);
+});
+
 const clearDoneBtn = document.getElementById('clear-done-btn');
 if (clearDoneBtn) {
   clearDoneBtn.addEventListener('click', () => {
@@ -1131,37 +1387,40 @@ document.querySelectorAll('.tree-node').forEach((node) => {
 // --- Keyboard Shortcuts ---
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+  // Suppress every global shortcut while a dialog is open, so e.g. Ctrl+N or
+  // Delete can't fire over the background list while a modal has visual focus
+  // (a focused <button> isn't an INPUT/TEXTAREA/SELECT, so the check above
+  // alone wouldn't catch it).
+  if (document.querySelector('.idm-modal:not(.hidden)')) return;
 
   if (e.ctrlKey && e.key.toLowerCase() === 'n') {
+    // Ctrl+N: Add new URL dialog
     e.preventDefault();
     if (addUrlModal) addUrlModal.classList.remove('hidden');
-  } else if (e.ctrlKey && e.key.toLowerCase() === 'v') {
-    // Ctrl+V: paste URL from clipboard
+  } else if (e.ctrlKey && e.key.toLowerCase() === 'o') {
+    // Ctrl+O: Options dialog
     e.preventDefault();
-    navigator.clipboard.readText().then((text) => {
-      if (text && text.startsWith('http')) showDownloadInfoModal(text);
-    }).catch(() => {});
+    openOptions();
+  } else if (e.key === 'Insert' || (e.ctrlKey && e.key.toLowerCase() === 'v')) {
+    // Insert / Ctrl+V: paste URL from clipboard into the Add URL dialog
+    e.preventDefault();
+    pasteUrlIntoAddModal();
   } else if (e.ctrlKey && e.key.toLowerCase() === 'a') {
+    // Ctrl+A: select all items in the list
     e.preventDefault();
     selectedIds.clear();
     for (const item of items.values()) selectedIds.add(item.id);
     render();
   } else if (e.key === 'Delete' && e.shiftKey) {
-    // Shift+Del: delete from disk
+    // Shift+Delete: delete selected downloads + delete the file(s) from disk
     e.preventDefault();
-    for (const id of selectedIds) {
-      if (window.api.remove) window.api.remove(id);
-    }
-    selectedIds.clear();
-    render();
+    confirmDelete(Array.from(selectedIds), true);
   } else if (e.key === 'Delete') {
+    // Delete: delete selected downloads (confirmation modal)
     e.preventDefault();
-    for (const id of selectedIds) {
-      if (window.api.remove) window.api.remove(id);
-    }
-    selectedIds.clear();
-    render();
-  } else if (e.code === 'Space') {
+    confirmDelete(Array.from(selectedIds), false);
+  } else if (e.code === 'Space' || e.key === 'F8') {
+    // Space / F8: pause (or resume, if already paused) selected download(s)
     e.preventDefault();
     for (const id of selectedIds) {
       const item = items.get(id);
@@ -1170,6 +1429,10 @@ document.addEventListener('keydown', (e) => {
         else if (window.api.resume) window.api.resume(item.id);
       }
     }
+  } else if (e.altKey && e.key === 'Enter') {
+    // Alt+Enter: Download Properties dialog
+    e.preventDefault();
+    showPropertiesModal(items.get(Array.from(selectedIds)[0]));
   } else if (e.key === 'Enter') {
     // Enter: open completed file
     const id = Array.from(selectedIds)[0];
@@ -1222,7 +1485,7 @@ window.addEventListener('drop', (e) => {
   e.preventDefault();
   document.body.classList.remove('drag-active');
   const url = extractDroppedUrl(e.dataTransfer);
-  if (url) showDownloadInfoModal(url);
+  if (url) routeUrlToAddFlow(url);
 });
 
 // --- Sidebar Badge Update ---

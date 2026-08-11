@@ -213,6 +213,18 @@ ipcMain.handle('shell:showInFolder', (_event, filePath) => {
   if (filePath) shell.showItemInFolder(filePath);
 });
 
+// "Delete file from disk" — moves to the Recycle Bin (shell.trashItem) rather
+// than a permanent unlink, so a Shift+Delete mistake is still recoverable.
+ipcMain.handle('shell:deleteFile', async (_event, filePath) => {
+  if (!filePath) return { ok: false, error: 'No file path' };
+  try {
+    await shell.trashItem(filePath);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 ipcMain.handle('bridge:clientCount', () => {
   return bridge && bridge.wss ? bridge.wss.clients.size : 0;
 });

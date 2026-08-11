@@ -12,7 +12,8 @@
       <div class="menu-item" id="menu-tasks">Tasks</div>
       <div class="idm-dropdown hidden" id="dropdown-tasks">
         <div class="dd-item" id="dd-add-url"><span class="dd-title">Add new download...</span><span class="dd-hotkey">Ctrl+N</span></div>
-        <div class="dd-item" id="dd-add-clipboard"><span class="dd-title">Add download from clipboard</span><span class="dd-hotkey">Ctrl+V</span></div>
+        <div class="dd-item" id="dd-add-clipboard"><span class="dd-title">Add download from clipboard</span><span class="dd-hotkey">Ins / Ctrl+V</span></div>
+        <div class="dd-item" id="dd-add-batch"><span class="dd-title">Add batch download...</span></div>
         <div class="dd-item" id="dd-run-grabber"><span class="dd-title">Run Site Grabber...</span></div>
         <div class="dd-sep"></div>
         <div class="dd-item" id="dd-export"><span class="dd-title">Export download list...</span></div>
@@ -88,7 +89,7 @@
       <span class="tool-icon resume-icon"></span>
       <span class="tool-label">Resume</span>
     </button>
-    <button id="pause-all-btn" class="idm-tool-btn">
+    <button id="pause-all-btn" class="idm-tool-btn" title="Pause selected (Space / F8)">
       <span class="tool-icon stop-icon"></span>
       <span class="tool-label">Stop</span>
     </button>
@@ -106,7 +107,7 @@
       <span class="tool-label">Delete C...</span>
     </button>
     <div class="idm-tool-sep"></div>
-    <button id="options-btn" class="idm-tool-btn">
+    <button id="options-btn" class="idm-tool-btn" title="Options (Ctrl+O)">
       <span class="tool-icon options-icon"></span>
       <span class="tool-label">Options</span>
     </button>
@@ -568,6 +569,93 @@
           <button id="grab-download-btn" class="idm-btn primary" style="display: none;">Download Selected</button>
           <button id="grab-cancel-btn" class="idm-btn">Cancel</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Batch Download Modal (wildcard ranges + multiline URL list) -->
+  <div id="batch-modal" class="idm-modal hidden">
+    <div class="idm-dialog" style="width: 620px;">
+      <div class="dialog-header">
+        <span>Add Batch Download</span>
+        <button id="batch-close" class="dialog-close">&times;</button>
+      </div>
+      <div class="dialog-body">
+        <div class="opt-group">
+          <div class="opt-group-title">URL Pattern(s) — one per line</div>
+          <textarea id="batch-urls-input" class="opt-input opt-textarea" style="min-height: 70px;" placeholder="http://example.com/video_[01-50].mp4&#10;http://example.com/file_[a-z].zip&#10;http://example.com/plain-file.pdf" spellcheck="false"></textarea>
+          <div class="opt-hint">Use [1-50] or [01-50] for numeric ranges (leading zeros in the range = padding), [a-z] for letter ranges, or [1-50]%03d to force 3-digit padding. One pattern or plain URL per line.</div>
+        </div>
+        <div class="opt-row" style="margin-bottom: 12px; align-items: flex-end;">
+          <div style="flex: 1;">
+            <div class="opt-group-title" style="margin-bottom: 6px;">Leading zero digits</div>
+            <input id="batch-pad-width" type="number" min="0" max="10" class="opt-input" placeholder="Auto" />
+          </div>
+          <div style="flex: 1;">
+            <div class="opt-group-title" style="margin-bottom: 6px;">Save to category</div>
+            <select id="batch-category" class="opt-input">
+              <option value="General">General</option>
+              <option value="Compressed">Compressed</option>
+              <option value="Documents">Documents</option>
+              <option value="Music">Music</option>
+              <option value="Programs">Programs</option>
+              <option value="Video">Video</option>
+            </select>
+          </div>
+          <button id="batch-preview-btn" class="idm-btn primary">Generate Preview</button>
+        </div>
+
+        <div class="grab-status-row">
+          <span id="batch-count-text">Enter URL pattern(s) above and click "Generate Preview".</span>
+          <label class="opt-check" id="batch-select-all-wrap" style="margin: 0; display: none;"><input type="checkbox" id="batch-select-all" /> Select All</label>
+        </div>
+        <div class="grab-tree" id="batch-preview-list"></div>
+      </div>
+      <div class="dialog-footer">
+        <button id="batch-ok-btn" class="idm-btn primary">OK (Add to Queue)</button>
+        <button id="batch-cancel-btn" class="idm-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete Confirmation Modal -->
+  <div id="delete-confirm-modal" class="idm-modal hidden">
+    <div class="idm-dialog" style="width: 420px;">
+      <div class="dialog-header">
+        <span>Confirm Delete</span>
+        <button id="delete-confirm-close" class="dialog-close">&times;</button>
+      </div>
+      <div class="dialog-body">
+        <p id="delete-confirm-text">Remove the selected download(s) from the list?</p>
+      </div>
+      <div class="dialog-footer">
+        <button id="delete-confirm-ok-btn" class="idm-btn primary">Delete</button>
+        <button id="delete-confirm-cancel-btn" class="idm-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Download Properties Modal -->
+  <div id="properties-modal" class="idm-modal hidden">
+    <div class="idm-dialog" style="width: 480px;">
+      <div class="dialog-header">
+        <span>Download Properties</span>
+        <button id="properties-close" class="dialog-close">&times;</button>
+      </div>
+      <div class="dialog-body">
+        <div class="opt-group">
+          <div class="complete-stat"><span class="complete-stat-label">File name:</span> <span id="prop-filename"></span></div>
+          <div class="complete-stat"><span class="complete-stat-label">Status:</span> <span id="prop-status"></span></div>
+          <div class="complete-stat"><span class="complete-stat-label">Size:</span> <span id="prop-size"></span></div>
+          <div class="complete-stat"><span class="complete-stat-label">Downloaded:</span> <span id="prop-downloaded"></span></div>
+          <div class="complete-stat"><span class="complete-stat-label">Category:</span> <span id="prop-category"></span></div>
+          <div class="complete-stat"><span class="complete-stat-label">Added:</span> <span id="prop-added"></span></div>
+          <div class="complete-stat"><span class="complete-stat-label">Saved to:</span> <span id="prop-path" class="complete-path"></span></div>
+          <div class="complete-stat"><span class="complete-stat-label">URL:</span> <span id="prop-url" class="complete-path"></span></div>
+        </div>
+      </div>
+      <div class="dialog-footer">
+        <button id="properties-close-btn" class="idm-btn primary">Close</button>
       </div>
     </div>
   </div>
