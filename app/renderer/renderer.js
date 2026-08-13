@@ -206,12 +206,20 @@ function injectIcons() {
 // Ctrl+A while the sidebar is filtered to "Finished" must not silently arm
 // the hidden Unfinished rows for the next Delete.
 function visibleItems() {
-  return Array.from(items.values()).filter((item) => {
+  const list = Array.from(items.values()).filter((item) => {
     if (currentCategory === 'all') return true;
     if (currentCategory === 'unfinished') return item.status !== 'completed';
     if (currentCategory === 'finished') return item.status === 'completed';
+    if (currentCategory === 'queue') return (item.queueId || 'main') === currentQueueId;
     return categoryOf(item).toLowerCase() === currentCategory.toLowerCase();
   });
+
+  // Inside a queue, show the queue's actual running order — that ordering is
+  // what the pump consumes, so it has to be what the user sees and reorders.
+  if (currentCategory === 'queue') {
+    list.sort((a, b) => (a.position || 0) - (b.position || 0) || a.addedAt - b.addedAt);
+  }
+  return list;
 }
 
 // 2. Render Table Rows
@@ -276,7 +284,13 @@ function render() {
 
     tr.addEventListener('click', (e) => handleRowClick(e, item.id));
     tr.addEventListener('dblclick', () => {
-      if (isDone && item.destPath && window.api.openFile) window.api.openFile(item.destPath);
+      // Finished: open the file, as before. Still going: show the live
+      // per-connection view, which is what double-click does in IDM.
+      if (isDone) {
+        if (item.destPath && window.api.openFile) window.api.openFile(item.destPath);
+      } else {
+        showProgressModal(items.get(item.id) || item);
+      }
     });
     tr.addEventListener('contextmenu', (e) => {
       e.preventDefault();
@@ -721,6 +735,22 @@ async function openOptions() {
       setVal('cfg-speed-limit', String(cfg.speedLimitKBps || 0));
       if (cfg.maxConcurrentDownloads) setVal('cfg-max-simultaneous', String(cfg.maxConcurrentDownloads));
 
+      // Proxy
+      const proxy = cfg.proxy || {};
+      const mode = proxy.mode || 'direct';
+      setChecked('cfg-proxy-direct', mode === 'direct');
+      setChecked('cfg-proxy-manual', mode === 'manual');
+      setChecked('cfg-proxy-pac', mode === 'pac');
+      for (const scheme of ['http', 'https', 'ftp', 'socks']) {
+        setVal(`cfg-proxy-${scheme}-host`, (proxy[scheme] && proxy[scheme].host) || '');
+        setVal(`cfg-proxy-${scheme}-port`, String((proxy[scheme] && proxy[scheme].port) || ''));
+      }
+      setChecked('cfg-proxy-socks-all', proxy.useSocksForAll);
+      setChecked('cfg-proxy-socks-dns', proxy.socks ? proxy.socks.remoteDns !== false : true);
+      setVal('cfg-proxy-pac-url', proxy.pacUrl || '');
+      setVal('cfg-proxy-exceptions', proxy.exceptions || '');
+      updateProxyMode();
+
       // Save To
       setVal('cfg-save-dir', dirs.General || '');
       setVal('cfg-temp-dir', cfg.tempDir || '');
@@ -741,6 +771,44 @@ async function openOptions() {
   // Always reset to the first tab when opening.
   selectTab('general');
   settingsOverlay.classList.remove('hidden');
+}
+
+// Greys out whichever proxy section the selected mode doesn't use, so it's
+// obvious which fields are actually in play.
+function updateProxyMode() {
+  const manual = document.getElementById('cfg-proxy-manual')?.checked;
+  const pac = document.getElementById('cfg-proxy-pac')?.checked;
+  const manualGroup = document.getElementById('proxy-manual-group');
+  const pacGroup = document.getElementById('proxy-pac-group');
+  if (manualGroup) manualGroup.style.opacity = manual ? '1' : '0.45';
+  if (pacGroup) pacGroup.style.opacity = pac ? '1' : '0.45';
+}
+document.querySelectorAll('input[name="proxy-mode"]').forEach((r) => r.addEventListener('change', updateProxyMode));
+
+function readProxyForm(previous) {
+  const server = (scheme) => ({
+    // Credentials aren't exposed in this dialog, so carry forward whatever was
+    // already stored rather than blanking it on every save.
+    ...(previous[scheme] || {}),
+    host: getVal(`cfg-proxy-${scheme}-host`).trim(),
+    port: parseInt(getVal(`cfg-proxy-${scheme}-port`), 10) || 0,
+  });
+  const mode = document.getElementById('cfg-proxy-pac')?.checked
+    ? 'pac'
+    : document.getElementById('cfg-proxy-manual')?.checked
+    ? 'manual'
+    : 'direct';
+  return {
+    ...previous,
+    mode,
+    http: server('http'),
+    https: server('https'),
+    ftp: server('ftp'),
+    socks: { ...server('socks'), remoteDns: getChecked('cfg-proxy-socks-dns') },
+    useSocksForAll: getChecked('cfg-proxy-socks-all'),
+    pacUrl: getVal('cfg-proxy-pac-url').trim(),
+    exceptions: getVal('cfg-proxy-exceptions').trim(),
+  };
 }
 
 async function saveOptions() {
@@ -768,6 +836,7 @@ async function saveOptions() {
       maxConnections: parseInt(getVal('cfg-max-conn'), 10) || 8,
       maxConcurrentDownloads: parseInt(getVal('cfg-max-simultaneous'), 10) || 4,
       speedLimitKBps: Math.max(0, parseInt(getVal('cfg-speed-limit'), 10) || 0),
+      proxy: readProxyForm(cfg.proxy || {}),
       tempDir: getVal('cfg-temp-dir').trim(),
       destDirs,
       fileTypes: getVal('cfg-file-types').trim(),
@@ -1541,6 +1610,7 @@ document.querySelectorAll('.tree-node').forEach((node) => {
     document.querySelectorAll('.tree-node').forEach((n) => n.classList.remove('active'));
     node.classList.add('active');
     currentCategory = node.dataset.cat || 'all';
+    if (currentCategory !== 'queue') currentQueueId = null;
     render();
   });
 });
@@ -1703,6 +1773,299 @@ function scheduleTableRender() {
     updateSidebarBadges();
   }, 100);
 }
+
+// --- Named queues ------------------------------------------------------------
+// The sidebar's "Queues" node used to be decorative: categoryOf() could never
+// return 'queues', so it always showed an empty list. It now expands into the
+// real queues, each filtering the table to its own contents.
+let knownQueues = [];
+let currentQueueId = null;
+
+function queueName(queueId) {
+  const q = knownQueues.find((x) => x.id === queueId);
+  return q ? q.name : 'Main download queue';
+}
+
+function renderQueueTree() {
+  const list = document.getElementById('queue-list');
+  if (!list) return;
+  list.innerHTML = '';
+  for (const q of knownQueues) {
+    const li = document.createElement('li');
+    li.className = 'tree-node';
+    li.dataset.cat = 'queue';
+    li.dataset.queueId = q.id;
+    li.classList.toggle('active', currentCategory === 'queue' && currentQueueId === q.id);
+    li.classList.toggle('queue-running', q.running);
+    li.innerHTML = `
+      <span class="tree-icon icon-queues"></span>
+      <span class="tree-title"></span>
+      <span class="queue-badge"></span>
+    `;
+    li.querySelector('.tree-title').textContent = q.name;
+    li.querySelector('.queue-badge').textContent = q.count ? String(q.count) : '';
+    li.title = `${q.name} — ${q.running ? 'running' : 'stopped'}, ${
+      q.maxConcurrent > 0 ? q.maxConcurrent + ' at once' : 'global concurrency'
+    }`;
+    li.addEventListener('click', () => {
+      document.querySelectorAll('.tree-node').forEach((n) => n.classList.remove('active'));
+      li.classList.add('active');
+      currentCategory = 'queue';
+      currentQueueId = q.id;
+      render();
+    });
+    list.appendChild(li);
+  }
+  renderQueueSubmenu();
+}
+
+function renderQueueSubmenu() {
+  const menu = document.getElementById('ctx-queue-submenu');
+  if (!menu) return;
+  menu.innerHTML = '';
+  for (const q of knownQueues) {
+    const el = document.createElement('div');
+    el.className = 'ctx-item';
+    el.textContent = q.name;
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (window.api.moveToQueue) window.api.moveToQueue(Array.from(selectedIds), q.id);
+      contextMenu?.classList.add('hidden');
+    });
+    menu.appendChild(el);
+  }
+}
+
+async function refreshQueues() {
+  if (!window.api.listQueues) return;
+  try {
+    knownQueues = (await window.api.listQueues()) || [];
+  } catch (e) {
+    knownQueues = [];
+  }
+  renderQueueTree();
+  renderQueuesModal();
+}
+
+// --- Queue manager dialog ----------------------------------------------------
+function renderQueuesModal() {
+  const body = document.getElementById('queues-tbody');
+  if (!body || document.getElementById('queues-modal')?.classList.contains('hidden')) return;
+  body.innerHTML = '';
+
+  for (const q of knownQueues) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><input type="text" class="q-name" /></td>
+      <td class="q-count"></td>
+      <td><input type="number" class="q-conc" min="0" max="32" step="1" /></td>
+      <td class="q-state"></td>
+      <td class="q-actions"></td>
+    `;
+    const nameInput = tr.querySelector('.q-name');
+    nameInput.value = q.name;
+    // The two built-in queues keep their names, matching IDM.
+    nameInput.disabled = q.isDefault;
+    nameInput.addEventListener('change', () => {
+      if (window.api.renameQueue) window.api.renameQueue(q.id, nameInput.value);
+    });
+
+    tr.querySelector('.q-count').textContent = String(q.count || 0);
+
+    const concInput = tr.querySelector('.q-conc');
+    concInput.value = String(q.maxConcurrent || 0);
+    concInput.addEventListener('change', () => {
+      if (window.api.setQueueConcurrency) window.api.setQueueConcurrency(q.id, parseInt(concInput.value, 10) || 0);
+    });
+
+    const state = tr.querySelector('.q-state');
+    state.textContent = q.running ? 'Running' : 'Stopped';
+    state.className = `q-state ${q.running ? 'queue-state-running' : 'queue-state-stopped'}`;
+
+    const actions = tr.querySelector('.q-actions');
+    const toggle = document.createElement('button');
+    toggle.className = 'idm-btn';
+    toggle.textContent = q.running ? 'Stop' : 'Start';
+    toggle.addEventListener('click', () => {
+      if (q.running) window.api.stopQueue && window.api.stopQueue(q.id);
+      else window.api.startQueue && window.api.startQueue(q.id);
+    });
+    actions.appendChild(toggle);
+
+    if (!q.isDefault) {
+      const del = document.createElement('button');
+      del.className = 'idm-btn';
+      del.textContent = 'Delete';
+      del.style.marginLeft = '4px';
+      del.title = 'Downloads in this queue move to the main queue';
+      del.addEventListener('click', () => {
+        if (window.api.deleteQueue) window.api.deleteQueue(q.id);
+      });
+      actions.appendChild(del);
+    }
+
+    body.appendChild(tr);
+  }
+}
+
+function openQueuesModal() {
+  document.getElementById('queues-modal')?.classList.remove('hidden');
+  renderQueuesModal();
+}
+function closeQueuesModal() {
+  document.getElementById('queues-modal')?.classList.add('hidden');
+}
+
+document.getElementById('queues-close')?.addEventListener('click', closeQueuesModal);
+document.getElementById('queues-close-btn')?.addEventListener('click', closeQueuesModal);
+document.getElementById('queues-root')?.addEventListener('click', openQueuesModal);
+document.getElementById('new-queue-btn')?.addEventListener('click', async () => {
+  const input = document.getElementById('new-queue-name');
+  const name = (input?.value || '').trim();
+  if (!name || !window.api.createQueue) return;
+  await window.api.createQueue(name, 0);
+  if (input) input.value = '';
+});
+
+// --- Reordering within a queue ----------------------------------------------
+function moveSelectedBy(delta) {
+  if (!window.api.reorder) return;
+  // Moving several rows at once has to start from the edge nearest the
+  // direction of travel, or the first move blocks the next one.
+  const order = visibleItems().map((i) => i.id);
+  const chosen = order.filter((id) => selectedIds.has(id));
+  const sequence = delta < 0 ? chosen : chosen.slice().reverse();
+  for (const id of sequence) window.api.reorder(id, delta);
+}
+
+document.getElementById('ctx-move-up')?.addEventListener('click', () => moveSelectedBy(-1));
+document.getElementById('ctx-move-down')?.addEventListener('click', () => moveSelectedBy(1));
+
+// --- Download Progress dialog (per-connection view) --------------------------
+// IDM's signature window: one live bar per connection, so you can watch the
+// multi-part transfer actually happening — including segments being split off
+// mid-download and handed to a free worker.
+//
+// The engine has always emitted this in progress.segments[]; nothing rendered
+// it. Rows are created once and then mutated in place: this repaints on every
+// progress tick (~400ms per active download), and rebuilding the list each time
+// would throw away the CSS transitions and make the bars stutter.
+let progressModalId = null;
+const progressRows = new Map(); // segment index -> { row, fill, bytes }
+
+const progressModal = document.getElementById('progress-modal');
+
+function closeProgressModal() {
+  progressModalId = null;
+  progressRows.clear();
+  const list = document.getElementById('prog-connections');
+  if (list) list.innerHTML = '';
+  progressModal?.classList.add('hidden');
+}
+
+function showProgressModal(item) {
+  if (!item || !progressModal) return;
+  progressModalId = item.id;
+  progressRows.clear();
+  const list = document.getElementById('prog-connections');
+  if (list) list.innerHTML = '';
+  renderProgressModal(item);
+  progressModal.classList.remove('hidden');
+}
+
+function statusLabel(item) {
+  switch (item.status) {
+    case 'running': return 'Downloading';
+    case 'paused': return 'Paused';
+    case 'queued': return 'Queued';
+    case 'held': return 'On Hold';
+    case 'error': return 'Error';
+    case 'completed': return 'Complete';
+    case 'cancelled': return 'Cancelled';
+    default: return item.status || '—';
+  }
+}
+
+function renderProgressModal(item) {
+  if (!item || item.id !== progressModalId) return;
+  const set = (id, text) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+  };
+
+  const p = item.progress || {};
+  set('prog-filename', item.filename || item.url || '—');
+  set('prog-status', item.error ? `Error — ${item.error}` : statusLabel(item));
+  set('prog-size', formatBytes(item.size));
+  set('prog-downloaded', formatBytes(p.downloaded));
+  set('prog-speed', item.status === 'running' ? formatSpeed(p.speedBytesPerSec) : '—');
+  set('prog-eta', item.status === 'running' && p.eta ? formatTimeLeft(p.eta) : '—');
+
+  const pct = Math.max(0, Math.min(100, p.percent != null ? p.percent : item.status === 'completed' ? 100 : 0));
+  const overallFill = document.getElementById('prog-overall-fill');
+  const overallText = document.getElementById('prog-overall-text');
+  if (overallFill) overallFill.style.width = `${pct}%`;
+  if (overallText) overallText.textContent = `${pct.toFixed(1)}%`;
+
+  const segments = Array.isArray(p.segments) ? p.segments : [];
+  const list = document.getElementById('prog-connections');
+  const empty = document.getElementById('prog-no-connections');
+  if (empty) empty.classList.toggle('hidden', segments.length > 0);
+  set('prog-conn-count', segments.length ? `${segments.filter((s) => s.active).length} of ${segments.length} active` : '');
+  if (!list) return;
+
+  // Dynamic splitting appends segments mid-download, so the row set can grow
+  // between ticks; rows are added on demand and never rebuilt wholesale.
+  for (const seg of segments) {
+    let entry = progressRows.get(seg.index);
+    if (!entry) {
+      const row = document.createElement('div');
+      row.className = 'prog-conn';
+      row.innerHTML = `
+        <span class="prog-conn-index"></span>
+        <div class="prog-conn-bar"><div class="prog-conn-fill"></div></div>
+        <span class="prog-conn-bytes"></span>
+      `;
+      list.appendChild(row);
+      entry = {
+        row,
+        index: row.querySelector('.prog-conn-index'),
+        fill: row.querySelector('.prog-conn-fill'),
+        bytes: row.querySelector('.prog-conn-bytes'),
+      };
+      progressRows.set(seg.index, entry);
+    }
+
+    const total = seg.total != null ? seg.total : null;
+    const segPct = total ? Math.max(0, Math.min(100, (seg.downloaded / total) * 100)) : seg.downloaded > 0 ? 100 : 0;
+    const complete = total != null && seg.downloaded >= total;
+
+    entry.index.textContent = `#${seg.index + 1}`;
+    entry.fill.style.width = `${segPct}%`;
+    entry.bytes.textContent = total != null ? `${formatBytes(seg.downloaded)} / ${formatBytes(total)}` : formatBytes(seg.downloaded);
+    entry.row.classList.toggle('active', Boolean(seg.active));
+    entry.row.classList.toggle('done', complete && !seg.active);
+    entry.row.title =
+      total != null
+        ? `Connection ${seg.index + 1} — bytes ${seg.start}–${seg.end} (${segPct.toFixed(1)}%)`
+        : `Connection ${seg.index + 1} — length unknown`;
+  }
+}
+
+const openProgressForSelection = () => {
+  const item = items.get(Array.from(selectedIds)[0]);
+  if (item) showProgressModal(item);
+};
+document.getElementById('ctx-progress')?.addEventListener('click', openProgressForSelection);
+document.getElementById('dd-progress')?.addEventListener('click', openProgressForSelection);
+document.getElementById('progress-close')?.addEventListener('click', closeProgressModal);
+document.getElementById('progress-close-btn')?.addEventListener('click', closeProgressModal);
+document.getElementById('prog-pause-btn')?.addEventListener('click', () => {
+  if (progressModalId && window.api.pause) window.api.pause(progressModalId);
+});
+document.getElementById('prog-resume-btn')?.addEventListener('click', () => {
+  if (progressModalId && window.api.resume) window.api.resume(progressModalId);
+});
 
 // --- Duplicate download confirmation -----------------------------------------
 // The Manager detects the duplicate but deliberately doesn't decide: the same
@@ -1968,6 +2331,7 @@ function init() {
   _initialized = true;
   injectIcons();
   initColumnResizing();
+  refreshQueues();
 
   if (window.api && window.api.getConfig) {
     window.api.getConfig().then((c) => { appConfig = c || {}; }).catch(() => {});
@@ -2008,6 +2372,10 @@ function init() {
         const prev = items.get(item.id);
         const prevStatus = prev ? prev.status : null;
         items.set(item.id, item);
+        // Repaint the progress dialog straight from the event rather than
+        // waiting on the coalesced table render — the whole point of that view
+        // is that the bars move in real time.
+        if (progressModalId === item.id) renderProgressModal(item);
         if (item.status !== prevStatus) {
           if (item.status === 'completed' && soundOn('complete')) playSound('complete');
           else if (item.status === 'error' && soundOn('error')) playSound('error');
@@ -2023,6 +2391,17 @@ function init() {
 
   if (window.api && window.api.onDuplicateDetected) {
     window.api.onDuplicateDetected(showDuplicateModal);
+  }
+
+  if (window.api && window.api.onQueuesChanged) {
+    window.api.onQueuesChanged((queues) => {
+      knownQueues = queues || [];
+      renderQueueTree();
+      renderQueuesModal();
+      // Counts and ordering live in the same payload, so the table may need
+      // to re-sort when the user is looking at a queue.
+      if (currentCategory === 'queue') scheduleTableRender();
+    });
   }
 
   if (window.api && window.api.onItemRemoved) {

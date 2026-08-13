@@ -3,6 +3,8 @@
 const zlib = require('zlib');
 const got = require('got');
 
+const { sharedResolver } = require('./proxy');
+
 // TLS certificate verification is ON. It used to be hardcoded OFF for every
 // request in the app, which silently accepted ANY certificate — including on
 // the requests that replay session cookies forwarded by the browser extension,
@@ -47,29 +49,54 @@ function withIdentityEncoding(headers) {
  * byte arithmetic.
  */
 function request(urlStr, { method = 'GET', headers = {}, raw = false } = {}) {
-  return new Promise((resolve, reject) => {
-    try {
-      const stream = client.stream(urlStr, {
-        method,
-        headers: raw ? withIdentityEncoding(headers) : headers,
-        decompress: !raw,
-        https: { rejectUnauthorized: !allowInsecureTLS },
-      });
+  // Proxy resolution is async (PAC evaluation may need a DNS lookup), but it
+  // costs nothing when no proxy is configured — `enabled` is false and this
+  // short-circuits before touching the resolver.
+  const agentPromise = sharedResolver.enabled
+    ? sharedResolver.resolve(urlStr).then((descriptor) => {
+        const secure = /^https:/i.test(urlStr);
+        const agent = sharedResolver.agentFor(descriptor, secure);
+        if (!agent) return undefined;
+        return secure ? { https: agent } : { http: agent };
+      })
+    : Promise.resolve(undefined);
 
-      stream.on('response', (response) => {
-        // Expose statusCode and headers on the stream object directly to simulate standard 'res'
-        stream.statusCode = response.statusCode;
-        stream.headers = response.headers;
-        resolve({ res: stream, finalUrl: response.requestUrl || urlStr });
-      });
+  return agentPromise.then(
+    (agent) =>
+      new Promise((resolve, reject) => {
+        try {
+          const stream = client.stream(urlStr, {
+            method,
+            headers: raw ? withIdentityEncoding(headers) : headers,
+            decompress: !raw,
+            https: { rejectUnauthorized: !allowInsecureTLS },
+            ...(agent ? { agent } : {}),
+          });
 
-      stream.on('error', (err) => {
-        reject(err);
-      });
-    } catch (e) {
-      reject(e);
-    }
-  });
+          stream.on('response', (response) => {
+            // Expose statusCode and headers on the stream object directly to simulate standard 'res'
+            stream.statusCode = response.statusCode;
+            stream.headers = response.headers;
+            resolve({ res: stream, finalUrl: response.requestUrl || urlStr });
+          });
+
+          stream.on('error', (err) => {
+            reject(err);
+          });
+        } catch (e) {
+          reject(e);
+        }
+      })
+  );
+}
+
+/** Push proxy settings into the shared resolver used by every request. */
+function configureProxy(settings) {
+  sharedResolver.configure(settings || { mode: 'direct' });
+}
+
+function describeProxy() {
+  return sharedResolver.describe();
 }
 
 /**
@@ -101,4 +128,4 @@ function createDecoder(encoding) {
   }
 }
 
-module.exports = { request, client, configureHttp, responseEncoding, createDecoder };
+module.exports = { request, client, configureHttp, configureProxy, describeProxy, responseEncoding, createDecoder };

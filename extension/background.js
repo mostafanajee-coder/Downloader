@@ -230,15 +230,116 @@ const MEDIA_CONTENT_TYPES = [
   'application/octet-stream',
 ];
 
-const tabMedia = new Map(); // tabId -> { manifests: Set<url>, subtitles: Map<url,{lang,label}>, sizes: Map<url, number> }
+// --- Stream identity & segment rejection ------------------------------------
+// A DASH/HLS player doesn't fetch "a video" — it fetches hundreds of small
+// chunks of one. Treating each chunk request as its own downloadable file is
+// what filled the panel with dozens of identical "Captured Video Stream" rows.
+// IDM lists the STREAM (one row per resolution); so must we.
+//
+// Two mechanisms do that: reject anything that is recognisably one piece of a
+// stream, and collapse whatever survives onto a canonical per-stream key.
+
+// Query parameters that change between chunks of the SAME stream. Stripping
+// them is what makes two chunk URLs collapse onto one identity.
+const VOLATILE_QUERY_PARAMS = new Set([
+  // Byte-range / sequence cursors — the chunk pointer itself.
+  'range', 'rn', 'rbuf', 'sq', 'bytestart', 'byteend', 'offset', 'start', 'begin', 'end',
+  // Per-request session, routing and expiry noise (mostly YouTube/googlevideo).
+  'cpn', 'ei', 'met', 'mt', 'mn', 'ms', 'mv', 'mvi', 'pl', 'initcwndbps', 'ump', 'srfvp',
+  'expire', 'ip', 'ipbits', 'sparams', 'sig', 'lsparams', 'lsig', 'pot', 'alr', 'keepalive',
+  'redirect_counter', 'rm', 'fallback_count', 'shardid', 'cmbypass', 'txp', 'xpc', 'beids',
+  '_nc_rid', 'oh', 'oe', 'ccb', 'bytestart_', 'tt', 'token', 'hdnts', 'hdnea',
+  // Unambiguous cache-busters. Deliberately NOT 't' or 'v' — those are just as
+  // often a real version or variant selector, and wrongly folding two distinct
+  // files into one row is a worse failure than showing an extra row.
+  '_', 'cb', 'nocache', 'rand', 'random', 'timestamp', 'cachebuster',
+]);
+
+// A request that is one PIECE of a stream rather than a complete file.
+const STREAM_SEGMENT_PATTERN = new RegExp(
+  [
+    '\\.m4s(\\?|$)',            // DASH media segment
+    '[?&]sq=\\d',               // YouTube DASH sequence number
+    '[?&]range=\\d+-\\d*',      // explicit byte-range fetch
+    '[?&]bytestart=\\d',        // Facebook/others
+    '[_-]seg(ment)?[_-]?\\d+',  // media_seg-00012.ts
+    '[_-]chunk[_-]?\\d+',
+    '[_-]frag(ment)?[_-]?\\d+',
+    '/seg-\\d+',
+    '/init\\.(mp4|m4s)(\\?|$)', // initialization segment
+    '\\binit-[a-z0-9]+\\.(mp4|m4s)(\\?|$)',
+    '\\d{4,}\\.ts(\\?|$)',      // numbered HLS segment: media_0001234.ts
+  ].join('|'),
+  'i'
+);
+
+// CDN shards spread one stream across many hostnames (rr3---sn-abc.googlevideo
+// .com, rr7---sn-xyz.googlevideo.com …). Fold them together or the same video
+// reappears once per edge node the player happened to touch.
+function canonicalHost(hostname) {
+  const h = String(hostname || '').toLowerCase();
+  const shard = /^(?:rr\d+---)?sn-[a-z0-9-]+\.(googlevideo\.com)$/.exec(h);
+  if (shard) return shard[1];
+  return h.replace(/^(?:v|video|media|cdn|edge|stream)[-.]?\d+[.-]/, '');
+}
+
+/**
+ * A stable identity for the STREAM a URL belongs to. Two chunk URLs of the same
+ * rendition produce the same key; two different renditions (different `itag`,
+ * different path) do not — `itag`/`quality` are deliberately preserved because
+ * they are exactly what distinguishes 1080p from 720p.
+ */
+function streamKeyFor(rawUrl) {
+  let u;
+  try {
+    u = new URL(rawUrl);
+  } catch (e) {
+    return String(rawUrl).split('?')[0];
+  }
+  const params = [];
+  for (const [k, v] of u.searchParams) {
+    if (VOLATILE_QUERY_PARAMS.has(k.toLowerCase())) continue;
+    params.push(`${k}=${v}`);
+  }
+  params.sort();
+  // Trailing chunk numbers in the PATH collapse too (…/video_0001.ts).
+  const cleanPath = u.pathname.replace(/\d{3,}(?=\.[a-z0-9]{2,5}$)/i, 'N');
+  return `${canonicalHost(u.hostname)}${cleanPath}?${params.join('&')}`;
+}
+
+// A hostile or merely busy page must not be able to grow this without bound.
+const MAX_TRACKED_MEDIA_PER_TAB = 60;
+
+const tabMedia = new Map(); // tabId -> { manifests: Map<streamKey,url>, subtitles: Map<url,{lang,label}>, sizes: Map<url, number> }
 const ytFormats = new Map(); // tabId -> Map<label, item>
 const fbFormats = new Map(); // tabId -> Map<url, item>
 
 function getTabState(tabId) {
   if (!tabMedia.has(tabId)) {
-    tabMedia.set(tabId, { manifests: new Set(), subtitles: new Map(), sizes: new Map() });
+    tabMedia.set(tabId, { manifests: new Map(), subtitles: new Map(), sizes: new Map() });
   }
   return tabMedia.get(tabId);
+}
+
+/** True for a manifest/playlist — the thing we WANT, as opposed to its chunks. */
+function isManifestUrl(url) {
+  return /\.(m3u8|mpd)(\?|$)/i.test(String(url || ''));
+}
+
+/**
+ * Record a media URL for a tab, collapsing it onto its stream identity.
+ * Returns true if this actually added something new (i.e. the caller should
+ * mark the tab dirty). Chunk requests are rejected outright.
+ */
+function recordMedia(state, url) {
+  // A manifest is always worth keeping, even if its filename looks segment-ish.
+  if (!isManifestUrl(url) && STREAM_SEGMENT_PATTERN.test(url)) return false;
+
+  const key = streamKeyFor(url);
+  if (state.manifests.has(key)) return false;
+  if (state.manifests.size >= MAX_TRACKED_MEDIA_PER_TAB) return false;
+  state.manifests.set(key, url);
+  return true;
 }
 
 // --- Panel filters -----------------------------------------------------------
@@ -371,7 +472,7 @@ function persistTabState(tabId, state) {
     chrome.storage.session
       .set({
         [SESSION_KEY_PREFIX + tabId]: {
-          manifests: Array.from(state.manifests),
+          manifests: Array.from(state.manifests.values()),
           subtitles: Array.from(state.subtitles.entries()),
         },
       })
@@ -396,7 +497,17 @@ async function rehydrateFromSession() {
       }
       if (tabMedia.has(tabId)) continue; // fresher in-memory state already exists
       tabMedia.set(tabId, {
-        manifests: new Set(value.manifests || []),
+        // Rebuilt through the same keying path so a session restored from an
+        // older build (which stored raw chunk URLs) is deduplicated on load.
+        manifests: (() => {
+          const m = new Map();
+          for (const u of value.manifests || []) {
+            if (!isManifestUrl(u) && STREAM_SEGMENT_PATTERN.test(u)) continue;
+            const k = streamKeyFor(u);
+            if (!m.has(k) && m.size < MAX_TRACKED_MEDIA_PER_TAB) m.set(k, u);
+          }
+          return m;
+        })(),
         subtitles: new Map(value.subtitles || []),
         sizes: new Map(),
       });
@@ -453,10 +564,7 @@ chrome.webRequest.onBeforeRequest.addListener(
 
     const state = getTabState(details.tabId);
     if (MEDIA_PATTERN.test(details.url)) {
-      if (!state.manifests.has(details.url)) {
-        state.manifests.add(details.url);
-        markTabDirty(details.tabId);
-      }
+      if (recordMedia(state, details.url)) markTabDirty(details.tabId);
     } else if (SUB_PATTERN.test(details.url) || details.url.includes('/api/timedtext')) {
       if (!state.subtitles.has(details.url)) {
         let label = details.url.split('/').pop().split('?')[0];
@@ -490,17 +598,14 @@ chrome.webRequest.onHeadersReceived.addListener(
     // URL matched. Prune it too — onBeforeRequest may already have recorded it
     // on the strength of the URL alone.
     if (skipHtml && isHtmlLike(contentType, details.url)) {
-      if (state.manifests.delete(details.url)) markTabDirty(details.tabId);
+      if (state.manifests.delete(streamKeyFor(details.url))) markTabDirty(details.tabId);
       return;
     }
 
     if (contentType) {
       const val = contentType.toLowerCase();
       if (val.startsWith('video/') || val.startsWith('audio/') || MEDIA_CONTENT_TYPES.some((ct) => val.includes(ct))) {
-        if (!state.manifests.has(details.url)) {
-          state.manifests.add(details.url);
-          markTabDirty(details.tabId);
-        }
+        if (recordMedia(state, details.url)) markTabDirty(details.tabId);
         isMedia = true;
       }
     }
@@ -524,7 +629,7 @@ chrome.webRequest.onHeadersReceived.addListener(
         state.sizes.set(details.url, total);
         // Now that the real size is known, a file below the floor can be
         // dropped at the source rather than filtered on every snapshot.
-        if (isBelowPanelMinSize(details.url, 'file', total) && state.manifests.delete(details.url)) {
+        if (isBelowPanelMinSize(details.url, 'file', total) && state.manifests.delete(streamKeyFor(details.url))) {
           markTabDirty(details.tabId);
         }
       }
@@ -609,10 +714,56 @@ async function buildMediaSnapshot(tabId) {
     // proceed with an empty title rather than failing the whole snapshot.
   }
 
-  const rawManifests = state ? Array.from(state.manifests) : [];
+  let rawManifests = state ? Array.from(state.manifests.values()) : [];
+
+  // When a parsed source already describes the video properly, the raw
+  // progressive URLs the player happened to hit are noise, not extra options.
+  // IDM shows six clean resolutions for a YouTube video precisely because it
+  // reads the player config instead of listing what the network sniffer saw.
+  const hasParsedFormats =
+    (tabId != null && ytFormats.has(tabId) && ytFormats.get(tabId).size > 0) ||
+    (tabId != null && fbFormats.has(tabId) && fbFormats.get(tabId).size > 0);
+  if (hasParsedFormats) {
+    rawManifests = rawManifests.filter(
+      (u) => isManifestUrl(u) || !/googlevideo\.com|\/videoplayback|fbcdn\.net|video_stream/i.test(u)
+    );
+  }
+
+  // A master manifest supersedes the individual renditions fetched from it:
+  // once we can parse the master, listing its children duplicates every
+  // quality a second time.
+  //
+  // Scoped deliberately tightly. Only true segment container types are
+  // suppressed (never .mp4 — a progressive download can legitimately sit on the
+  // same page as a stream), and only for URLs from the same origin as a master,
+  // so an unrelated stream elsewhere on the page survives.
+  const masterOrigins = new Set();
+  for (const u of rawManifests) {
+    if (!/\/master[.-]|master\.m3u8|\.mpd(\?|$)/i.test(u)) continue;
+    try {
+      masterOrigins.add(new URL(u).origin);
+    } catch (e) {
+      /* unparseable — can't scope it, so it suppresses nothing */
+    }
+  }
+  if (masterOrigins.size) {
+    rawManifests = rawManifests.filter((u) => {
+      if (isManifestUrl(u)) return true;
+      if (!/\.(ts|m4s|aac)(\?|$)/i.test(u)) return true;
+      try {
+        return !masterOrigins.has(new URL(u).origin);
+      } catch (e) {
+        return true;
+      }
+    });
+  }
+
   const parsedItems = [];
   const seenUrls = new Set();
   const seenLabels = new Set();
+  // Collapses two renditions that describe the same quality (e.g. an mp4 and a
+  // webm 1080p) down to one row, which is what makes the list read like IDM's.
+  const seenQualities = new Set();
 
   for (const mediaUrl of rawManifests) {
     const titleClean = cleanMediaTitle('', tabTitle, mediaUrl, mediaUrl.includes('.m3u8'));
@@ -697,6 +848,17 @@ async function buildMediaSnapshot(tabId) {
       let sizeStr = '';
       if (size > 1024 * 1024) sizeStr = ` ${(size / 1024 / 1024).toFixed(2)} MB`;
       else if (size > 1024) sizeStr = ` ${Math.round(size / 1024)} KB`;
+
+      // Two chunk URLs that survived keying but describe the same rendition
+      // (same host + same quality) must not both be offered.
+      let qualityKey = null;
+      try {
+        qualityKey = `${canonicalHost(new URL(mediaUrl).hostname)}|${qualityLabel}|${kind}`;
+      } catch (e) {
+        qualityKey = `${qualityLabel}|${kind}`;
+      }
+      if (seenQualities.has(qualityKey)) continue;
+      seenQualities.add(qualityKey);
 
       const label = `${titleClean} - MP4 File (${qualityLabel})${sizeStr}`;
       if (!seenLabels.has(label)) {
@@ -840,8 +1002,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const state = getTabState(tabId);
       // Remove range parameters to prevent duplicates for the same file
       const cleanUrl = msg.url.replace(/&range=\d+-\d+/i, '').replace(/&bytestart=\d+/i, '');
-      if (!state.manifests.has(cleanUrl)) {
-        state.manifests.add(cleanUrl);
+      if (recordMedia(state, cleanUrl)) {
         markTabDirty(tabId);
       }
     }

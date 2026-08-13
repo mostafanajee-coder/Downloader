@@ -40,6 +40,18 @@ const DEFAULT_CONFIG = {
   // proxy). Off by default: certificates are verified, because these requests
   // replay the session cookies the browser extension captured.
   allowInsecureTLS: false,
+  // Proxy tab. mode: 'direct' | 'manual' | 'pac'. Empty host = that protocol
+  // is not proxied; exceptions are shell globs matched against the hostname.
+  proxy: {
+    mode: 'direct',
+    http: { host: '', port: 8080, username: '', password: '' },
+    https: { host: '', port: 8080, username: '', password: '' },
+    ftp: { host: '', port: 8080, username: '', password: '' },
+    socks: { host: '', port: 1080, username: '', password: '', remoteDns: true },
+    useSocksForAll: false,
+    exceptions: '<local> localhost 127.0.0.1 192.168.*',
+    pacUrl: '',
+  },
   // Sounds tab — play a tone on these events.
   sounds: {
     complete: true,

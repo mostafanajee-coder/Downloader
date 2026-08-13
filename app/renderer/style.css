@@ -420,6 +420,197 @@ body.col-resizing * {
   border-color: rgba(255, 255, 255, 0.4);
 }
 
+.proxy-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.proxy-label {
+  width: 64px;
+  color: #8b93a7;
+  flex: 0 0 auto;
+}
+
+.proxy-port {
+  max-width: 82px;
+  flex: 0 0 auto;
+}
+
+/* --- Queues ---------------------------------------------------------------- */
+.queue-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.queue-table th {
+  text-align: left;
+  color: #8b93a7;
+  font-weight: normal;
+  border-bottom: 1px solid var(--idm-win-border);
+  padding: 3px 4px;
+}
+
+.queue-table td {
+  padding: 4px;
+  border-bottom: 1px solid #2a2a2a;
+  vertical-align: middle;
+}
+
+.queue-table input[type="text"],
+.queue-table input[type="number"] {
+  width: 100%;
+  background: #14171f;
+  color: #fff;
+  border: 1px solid #333;
+  padding: 3px 4px;
+}
+
+.queue-state-running { color: #3ad07a; }
+.queue-state-stopped { color: #888; }
+
+.tree-node .queue-badge {
+  margin-left: auto;
+  color: #8b93a7;
+  padding-left: 6px;
+}
+
+.tree-node.queue-running .tree-title {
+  color: #3ad07a;
+}
+
+/* Context-menu submenu (Move to queue) */
+.ctx-submenu-wrap {
+  position: relative;
+}
+
+.ctx-submenu-wrap::after {
+  content: "\25B8";
+  position: absolute;
+  right: 8px;
+  color: #8b93a7;
+}
+
+.ctx-submenu {
+  display: none;
+  position: absolute;
+  left: 100%;
+  top: -3px;
+  min-width: 170px;
+  background-color: var(--idm-win-menu);
+  border: 1px solid var(--idm-win-border);
+  box-shadow: 2px 2px 6px rgba(0, 0, 0, 0.5);
+  z-index: 4001;
+  padding: 3px 0;
+}
+
+.ctx-submenu-wrap:hover .ctx-submenu {
+  display: block;
+}
+
+/* --- Download Progress dialog: one live bar per connection ----------------- */
+.prog-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 16px;
+  margin-bottom: 10px;
+}
+
+.prog-stat {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.prog-label {
+  color: #8b93a7;
+  min-width: 74px;
+}
+
+.prog-value {
+  color: var(--idm-win-text-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prog-overall {
+  height: 18px;
+  margin-bottom: 12px;
+}
+
+.prog-conn-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  border-bottom: 1px solid var(--idm-win-border);
+  padding-bottom: 3px;
+  margin-bottom: 6px;
+  color: #8b93a7;
+}
+
+.prog-conn-count {
+  color: var(--idm-win-text);
+}
+
+/* Capped so a download that dynamically splits into many segments scrolls
+   rather than growing the dialog off the bottom of the screen. */
+.prog-connections {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.prog-conn {
+  display: grid;
+  grid-template-columns: 30px 1fr 96px;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.prog-conn-index {
+  color: #8b93a7;
+  text-align: right;
+}
+
+.prog-conn-bar {
+  position: relative;
+  height: 12px;
+  background-color: #14171f;
+  border: 1px solid #3a3a3a;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.prog-conn-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(180deg, #4a5568 0%, #38404f 100%);
+  transition: width 0.2s ease;
+}
+
+/* An actively transferring connection gets the same green as the main list;
+   idle ones stay grey, which is what makes the split/join behaviour readable. */
+.prog-conn.active .prog-conn-fill {
+  background: linear-gradient(180deg, #3ad07a 0%, #1f9d54 100%);
+}
+
+.prog-conn.done .prog-conn-fill {
+  background: linear-gradient(180deg, #3a7bd0 0%, #1f5a9d 100%);
+}
+
+.prog-conn-bytes {
+  color: var(--idm-win-text);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.prog-empty {
+  color: #8b93a7;
+  padding: 10px 2px;
+}
+
 /* Drag & drop hint when dragging a link over the window */
 body.drag-active::after {
   content: "Drop link to download";

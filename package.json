@@ -12,6 +12,8 @@
   "dependencies": {
     "better-sqlite3": "^13.0.3",
     "got": "^11.8.3",
+    "http-proxy-agent": "^9.1.0",
+    "https-proxy-agent": "^9.1.0",
     "m3u8-parser": "^7.2.0",
     "node-notifier": "^10.0.1",
     "speedometer": "^1.1.0",
@@ -22,7 +24,8 @@
     "electron-builder": "^26.15.3"
   },
   "build": {
-    "npmRebuild": false, "appId": "com.mostafa.downloader",
+    "npmRebuild": false,
+    "appId": "com.mostafa.downloader",
     "productName": "Downloader",
     "directories": {
       "output": "dist2"

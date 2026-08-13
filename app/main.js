@@ -74,6 +74,7 @@ function wireManagerEvents() {
   // the browser extension as well as the UI, so it defers the decision to
   // whoever is listening. The renderer prompts and re-adds with allowDuplicate.
   manager.on('duplicate-detected', (info) => sendToWindow('queue:duplicate', info));
+  manager.on('queues-changed', (queues) => sendToWindow('queues:changed', queues));
 
   const notifiedSet = new Set();
   manager.on('updated', (item) => {
@@ -87,7 +88,34 @@ function wireManagerEvents() {
 // Best-effort system notification. Wrapped so a broken notifier backend
 // (missing notify-send on some Linux setups, etc.) can never itself take down
 // the process — a failed notification should be a no-op, not a crash.
+//
+// Rate-limited, and that limit is load-bearing rather than cosmetic. On Windows
+// node-notifier shows each toast by spawning a helper executable, so an error
+// that repeats — a progress tick that throws, a rejection on every retry —
+// turns into a process-spawn storm that will bring the whole machine to its
+// knees and make the app look frozen. The failure being reported is then far
+// less damaging than the reporting of it.
+const NOTIFY_MIN_INTERVAL_MS = 10000;
+const _notifyHistory = new Map(); // message -> last shown at
+let _notifyLastAny = 0;
+
 function notifyUser(title, message) {
+  const now = Date.now();
+  const key = `${title}|${message}`;
+  // Identical messages are throttled hard; anything at all is throttled to one
+  // per second, so a burst of *different* errors still can't spawn a storm.
+  if (now - (_notifyHistory.get(key) || 0) < NOTIFY_MIN_INTERVAL_MS) return;
+  if (now - _notifyLastAny < 1000) return;
+  _notifyHistory.set(key, now);
+  _notifyLastAny = now;
+
+  // Keep the dedupe map from growing without bound over a long session.
+  if (_notifyHistory.size > 50) {
+    for (const [k, at] of _notifyHistory) {
+      if (now - at > NOTIFY_MIN_INTERVAL_MS) _notifyHistory.delete(k);
+    }
+  }
+
   try {
     notifier.notify({ title, message, wait: false });
   } catch (e) {
@@ -280,9 +308,20 @@ ipcMain.handle('queue:resumeAll', () => manager.resumeAll());
 ipcMain.handle('queue:startAll', () => manager.startAll());
 ipcMain.handle('queue:refreshUrl', (_event, { id, url }) => manager.refreshUrl(id, url));
 ipcMain.handle('queue:hold', (_event, id) => manager.hold(id));
-ipcMain.handle('queue:startQueue', () => manager.startQueue());
-ipcMain.handle('queue:stopQueue', () => manager.stopQueue());
+ipcMain.handle('queue:startQueue', (_event, queueId) => manager.startQueue(queueId));
+ipcMain.handle('queue:stopQueue', (_event, queueId) => manager.stopQueue(queueId));
 ipcMain.handle('queue:isQueueRunning', () => manager.isQueueRunning());
+ipcMain.handle('queue:reorder', (_event, { id, delta }) => manager.reorder(id, delta));
+
+// --- Named queues -----------------------------------------------------------
+ipcMain.handle('queues:list', () => manager.listQueues());
+ipcMain.handle('queues:create', (_event, { name, maxConcurrent }) => manager.createQueue(name, maxConcurrent));
+ipcMain.handle('queues:rename', (_event, { queueId, name }) => manager.renameQueue(queueId, name));
+ipcMain.handle('queues:setConcurrency', (_event, { queueId, maxConcurrent }) =>
+  manager.setQueueConcurrency(queueId, maxConcurrent)
+);
+ipcMain.handle('queues:delete', (_event, queueId) => manager.deleteQueue(queueId));
+ipcMain.handle('queues:move', (_event, { ids, queueId }) => manager.moveToQueue(ids, queueId));
 
 ipcMain.handle('config:get', () => config.getAll());
 ipcMain.handle('config:set', (_event, newConfig) => {

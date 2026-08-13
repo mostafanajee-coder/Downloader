@@ -36,6 +36,7 @@
         <div class="dd-item" id="dd-delete-disk"><span class="dd-title">Delete file from disk</span><span class="dd-hotkey">Shift+Del</span></div>
         <div class="dd-item" id="dd-delete-done"><span class="dd-title">Delete completed</span></div>
         <div class="dd-sep"></div>
+        <div class="dd-item" id="dd-progress"><span class="dd-title">Show download progress...</span></div>
         <div class="dd-item" id="dd-properties"><span class="dd-title">Properties</span><span class="dd-hotkey">Alt+Enter</span></div>
       </div>
     </div>
@@ -166,10 +167,11 @@
           <span class="tree-icon icon-grabber"></span>
           <span class="tree-title">Grabber projects</span>
         </li>
-        <li class="tree-node" data-cat="queues">
+        <li class="tree-node" data-cat="queues" id="queues-root">
           <span class="tree-icon icon-queues"></span>
           <span class="tree-title">Queues</span>
         </li>
+        <ul id="queue-list"></ul>
         <li class="tree-node" data-cat="unfinished">
           <span class="tree-icon icon-unfinished"></span>
           <span class="tree-title">Unfinished</span>
@@ -252,7 +254,87 @@
     <div class="ctx-item" id="ctx-delete">Delete</div>
     <div class="ctx-item" id="ctx-delete-disk">Delete from Disk</div>
     <div class="ctx-sep"></div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" id="ctx-move-up">Move up</div>
+    <div class="ctx-item" id="ctx-move-down">Move down</div>
+    <div class="ctx-item ctx-submenu-wrap" id="ctx-move-queue">
+      Move to queue
+      <div class="ctx-submenu" id="ctx-queue-submenu"></div>
+    </div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" id="ctx-progress">Show download progress...</div>
     <div class="ctx-item" id="ctx-properties">Properties...</div>
+  </div>
+
+  <!-- Queue Manager: named queues with their own concurrency and run state -->
+  <div id="queues-modal" class="idm-modal hidden">
+    <div class="idm-dialog" style="width: 560px;">
+      <div class="dialog-header">
+        <span>Manage Queues</span>
+        <button id="queues-close" class="dialog-close">&times;</button>
+      </div>
+      <div class="dialog-body">
+        <table class="queue-table">
+          <thead>
+            <tr>
+              <th>Queue</th>
+              <th style="width:70px;">Files</th>
+              <th style="width:96px;">At once</th>
+              <th style="width:80px;">State</th>
+              <th style="width:150px;">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="queues-tbody"></tbody>
+        </table>
+        <div class="opt-row" style="margin-top:12px;">
+          <input id="new-queue-name" type="text" class="opt-input" placeholder="New queue name" />
+          <button id="new-queue-btn" class="idm-btn">Create queue</button>
+        </div>
+        <div class="opt-hint">"At once" is that queue's own concurrency limit. 0 follows the global setting in Options &rarr; Connection.</div>
+      </div>
+      <div class="dialog-footer">
+        <button id="queues-close-btn" class="idm-btn primary">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Download Progress (IDM's signature per-connection view) -->
+  <div id="progress-modal" class="idm-modal hidden">
+    <div class="idm-dialog" style="width: 560px;">
+      <div class="dialog-header">
+        <span id="progress-title">Download Progress</span>
+        <button id="progress-close" class="dialog-close">&times;</button>
+      </div>
+      <div class="dialog-body">
+        <div class="prog-summary">
+          <div class="prog-stat"><span class="prog-label">File</span><span id="prog-filename" class="prog-value"></span></div>
+          <div class="prog-stat"><span class="prog-label">Status</span><span id="prog-status" class="prog-value"></span></div>
+          <div class="prog-stat"><span class="prog-label">Size</span><span id="prog-size" class="prog-value"></span></div>
+          <div class="prog-stat"><span class="prog-label">Downloaded</span><span id="prog-downloaded" class="prog-value"></span></div>
+          <div class="prog-stat"><span class="prog-label">Speed</span><span id="prog-speed" class="prog-value"></span></div>
+          <div class="prog-stat"><span class="prog-label">Time left</span><span id="prog-eta" class="prog-value"></span></div>
+        </div>
+
+        <div class="idm-progress prog-overall" title="Overall progress">
+          <div id="prog-overall-fill" class="idm-progress-fill" style="width:0%"></div>
+          <span id="prog-overall-text" class="idm-progress-text">0%</span>
+        </div>
+
+        <div class="prog-conn-header">
+          <span>Connections</span>
+          <span id="prog-conn-count" class="prog-conn-count"></span>
+        </div>
+        <div id="prog-connections" class="prog-connections"></div>
+        <div id="prog-no-connections" class="prog-empty hidden">
+          This download isn't running, so it has no live connections.
+        </div>
+      </div>
+      <div class="dialog-footer">
+        <button id="prog-pause-btn" class="idm-btn">Pause</button>
+        <button id="prog-resume-btn" class="idm-btn">Resume</button>
+        <button id="progress-close-btn" class="idm-btn primary">Close</button>
+      </div>
+    </div>
   </div>
 
   <!-- Duplicate Download Confirmation (IDM asks before queuing the same URL twice) -->
@@ -369,6 +451,7 @@
       <div class="idm-tabs" role="tablist">
         <div class="idm-tab active" data-tab="general">General</div>
         <div class="idm-tab" data-tab="connection">Connection</div>
+        <div class="idm-tab" data-tab="proxy">Proxy</div>
         <div class="idm-tab" data-tab="saveto">Save To</div>
         <div class="idm-tab" data-tab="filetypes">File Types</div>
         <div class="idm-tab" data-tab="sounds">Sounds</div>
@@ -447,6 +530,47 @@
               <option value="12">12</option>
             </select>
             <div class="opt-hint">How many downloads the queue processes at once; the rest wait their turn.</div>
+          </div>
+        </div>
+
+        <!-- PROXY -->
+        <div class="idm-tab-panel" data-panel="proxy">
+          <div class="opt-group">
+            <div class="opt-group-title">Proxy configuration</div>
+            <label class="opt-check"><input type="radio" name="proxy-mode" value="direct" id="cfg-proxy-direct" /> No proxy — connect directly</label>
+            <label class="opt-check"><input type="radio" name="proxy-mode" value="manual" id="cfg-proxy-manual" /> Use these proxy servers</label>
+            <label class="opt-check"><input type="radio" name="proxy-mode" value="pac" id="cfg-proxy-pac" /> Automatic configuration script (PAC)</label>
+          </div>
+
+          <div class="opt-group" id="proxy-manual-group">
+            <div class="opt-group-title">Servers</div>
+            <div class="proxy-row"><span class="proxy-label">HTTP</span>
+              <input id="cfg-proxy-http-host" type="text" class="opt-input" placeholder="host" />
+              <input id="cfg-proxy-http-port" type="number" class="opt-input proxy-port" placeholder="port" /></div>
+            <div class="proxy-row"><span class="proxy-label">HTTPS</span>
+              <input id="cfg-proxy-https-host" type="text" class="opt-input" placeholder="host (blank = use HTTP)" />
+              <input id="cfg-proxy-https-port" type="number" class="opt-input proxy-port" placeholder="port" /></div>
+            <div class="proxy-row"><span class="proxy-label">FTP</span>
+              <input id="cfg-proxy-ftp-host" type="text" class="opt-input" placeholder="host" />
+              <input id="cfg-proxy-ftp-port" type="number" class="opt-input proxy-port" placeholder="port" /></div>
+            <div class="proxy-row"><span class="proxy-label">SOCKS5</span>
+              <input id="cfg-proxy-socks-host" type="text" class="opt-input" placeholder="host" />
+              <input id="cfg-proxy-socks-port" type="number" class="opt-input proxy-port" placeholder="port" /></div>
+            <label class="opt-check"><input type="checkbox" id="cfg-proxy-socks-all" /> Route everything through SOCKS5</label>
+            <label class="opt-check"><input type="checkbox" id="cfg-proxy-socks-dns" /> Resolve hostnames at the SOCKS5 proxy (SOCKS5h)</label>
+            <div class="opt-hint">Resolving remotely stops your machine leaking DNS lookups for hosts you're reaching through the proxy.</div>
+          </div>
+
+          <div class="opt-group" id="proxy-pac-group">
+            <div class="opt-group-title">Automatic configuration script</div>
+            <input id="cfg-proxy-pac-url" type="text" class="opt-input" placeholder="http://example.com/proxy.pac or a local file path" />
+            <div class="opt-hint">The script's FindProxyForURL() decides per request. A script that can't be fetched or that fails falls back to a direct connection.</div>
+          </div>
+
+          <div class="opt-group">
+            <div class="opt-group-title">Do not use the proxy for these hosts</div>
+            <textarea id="cfg-proxy-exceptions" class="opt-input opt-textarea" spellcheck="false"></textarea>
+            <div class="opt-hint">Space-separated. Wildcards allowed (<code>*.internal</code>); <code>&lt;local&gt;</code> matches any name without a dot.</div>
           </div>
         </div>
 
