@@ -6,8 +6,11 @@
   "description": "Internet Download Manager (IDM) Twin Engine & Integration Module",
   "main": "app/main.js",
   "scripts": {
+    "start": "electron .",
     "dl": "node cli/download.js",
-    "start": "electron ."
+    "test": "node test/run-all.js",
+    "test:verbose": "node test/run-all.js --verbose",
+    "test:integration": "node cli/test-bridge.js && node cli/test-pause-resume.js && node cli/test-hls.js"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

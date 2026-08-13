@@ -29,11 +29,17 @@ const SYNC_QUEUE_ID = 'sync';
  * and enforces a cap on how many downloads run at once.
  */
 class Manager extends EventEmitter {
-  constructor({ stateDir, config, maxConcurrentDownloads = MAX_CONCURRENT_DOWNLOADS }) {
+  constructor({ stateDir, config, maxConcurrentDownloads = MAX_CONCURRENT_DOWNLOADS, defaultDestDir = null }) {
     super();
     this.stateDir = stateDir;
     this.config = config;
     this.maxConcurrentDownloads = maxConcurrentDownloads;
+    // Where downloads land when no ConfigManager is supplying category folders.
+    // Without this the last resort was process.cwd(), which for a packaged app
+    // is wherever Windows happened to launch it from — Program Files, or
+    // System32 for a shell-invoked instance. An explicit parameter also makes
+    // an embedded or test Manager hermetic instead of writing into the repo.
+    this.defaultDestDir = defaultDestDir || null;
     this.dbPath = path.join(stateDir, 'queue.db');
     
     // SQLite setup
@@ -436,7 +442,8 @@ class Manager extends EventEmitter {
       const id = crypto.randomUUID();
       const category = getCategoryForUrl(singleUrl, kind, suggestedFilename);
       const destDirs = this.config ? this.config.get('destDirs') : {};
-      const finalDestDir = destDir || destDirs[category] || destDirs['General'] || process.cwd();
+      const finalDestDir =
+        destDir || destDirs[category] || destDirs['General'] || this.defaultDestDir || process.cwd();
       try {
         const existingStat = fs.existsSync(finalDestDir) ? fs.statSync(finalDestDir) : null;
         if (!existingStat) {
