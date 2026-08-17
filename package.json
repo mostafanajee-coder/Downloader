@@ -1,6 +1,6 @@
 {
   "name": "downloader",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Mostafa Najee",
   "private": true,
   "description": "Internet Download Manager (IDM) Twin Engine & Integration Module",
