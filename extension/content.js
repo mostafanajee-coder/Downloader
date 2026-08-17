@@ -35,18 +35,24 @@ function cleanTitle(title) {
     .trim() || '';
 }
 
-// 1. Recursive Shadow DOM & DOM Video Scanner
-function findVideosRecursive(root = document) {
-  let results = [];
+// 1. Ultra-fast targeted Video Scanner without heavy full-DOM iterations
+function findVideos(root = document) {
+  const results = [];
   try {
-    const videos = Array.from(root.querySelectorAll('video, audio'));
-    results.push(...videos);
+    const direct = root.querySelectorAll('video, audio');
+    for (let i = 0; i < direct.length; i++) {
+      results.push(direct[i]);
+    }
 
-    // Deep Shadow DOM traversal
-    const allNodes = Array.from(root.querySelectorAll('*'));
-    for (const node of allNodes) {
-      if (node.shadowRoot) {
-        results.push(...findVideosRecursive(node.shadowRoot));
+    // Look for shadow roots inside known player containers and web components
+    const shadowHosts = root.querySelectorAll('[id*="player"], [class*="player"], media-player, shaka-player, amp-video');
+    for (let i = 0; i < shadowHosts.length; i++) {
+      const sr = shadowHosts[i].shadowRoot;
+      if (sr) {
+        const nested = sr.querySelectorAll('video, audio');
+        for (let j = 0; j < nested.length; j++) {
+          results.push(nested[j]);
+        }
       }
     }
   } catch (e) {}
@@ -54,8 +60,9 @@ function findVideosRecursive(root = document) {
 }
 
 function positionOverlay(overlay, video) {
+  if (!video || !overlay) return;
   const rect = video.getBoundingClientRect();
-  if (rect.width < 40 || rect.height < 15) {
+  if (rect.width < 50 || rect.height < 30 || (video.offsetWidth === 0 && video.offsetHeight === 0)) {
     overlay.style.display = 'none';
     return;
   }
@@ -76,7 +83,7 @@ async function buildMenuItems(video) {
 
   try {
     const sendMessagePromise = chrome.runtime.sendMessage({ type: 'get-media-for-tab' });
-    const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), 2000));
+    const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), 1500));
     const res = await Promise.race([sendMessagePromise, timeoutPromise]);
     if (res) {
       bgItems = res.items || [];
@@ -253,12 +260,45 @@ function positionMenu(menu, btn) {
   menu.style.left = `${window.scrollX + rect.left}px`;
 }
 
+// Global active overlays map for centralized throttled repositioning
+const activeOverlays = new Map(); // video -> { btn }
+let repositionScheduled = false;
+
+function repositionAllOverlays() {
+  repositionScheduled = false;
+  for (const [video, data] of activeOverlays.entries()) {
+    if (!document.body.contains(video) || video.dataset.ddlDismissed) {
+      data.btn.remove();
+      activeOverlays.delete(video);
+      continue;
+    }
+    positionOverlay(data.btn, video);
+  }
+}
+
+function requestReposition() {
+  if (repositionScheduled) return;
+  repositionScheduled = true;
+  requestAnimationFrame(repositionAllOverlays);
+}
+
+// Single, passive listeners for scrolling and viewport changes
+window.addEventListener('scroll', requestReposition, { passive: true });
+window.addEventListener('resize', requestReposition, { passive: true });
+
 function attachOverlay(video) {
   if (sidePanelModeActive) return;
   if (video.dataset.ddlAttached || video.dataset.ddlDismissed) return;
+  
+  // Guard against tiny audio/tracking elements
+  const rect = video.getBoundingClientRect();
+  if (rect.width > 0 && rect.height > 0 && (rect.width < 50 || rect.height < 30)) {
+    return;
+  }
+
   video.dataset.ddlAttached = '1';
 
-  const allVideos = findVideosRecursive();
+  const allVideos = findVideos();
   const countTag = allVideos.length > 1 ? ` (${allVideos.length})` : '';
 
   const btn = document.createElement('div');
@@ -274,17 +314,8 @@ function attachOverlay(video) {
   btn.title = 'Internet Download Manager Panel';
   document.body.appendChild(btn);
 
-  const reposition = () => {
-    if (video.dataset.ddlDismissed) {
-      btn.remove();
-      return;
-    }
-    positionOverlay(btn, video);
-  };
-  reposition();
-  window.addEventListener('scroll', reposition, true);
-  window.addEventListener('resize', reposition);
-  new ResizeObserver(reposition).observe(video);
+  activeOverlays.set(video, { btn });
+  positionOverlay(btn, video);
 
   const mainBtn = btn.querySelector('.ddl-btn-main');
   const closeBtn = btn.querySelector('.ddl-btn-close');
@@ -317,11 +348,23 @@ function attachOverlay(video) {
     closeMenus();
     video.dataset.ddlDismissed = '1';
     btn.remove();
+    activeOverlays.delete(video);
   });
 }
 
 function scan() {
-  findVideosRecursive().forEach(attachOverlay);
+  if (sidePanelModeActive) return;
+  findVideos().forEach(attachOverlay);
+}
+
+let scanDebounceTimer = null;
+function scheduleScan() {
+  if (sidePanelModeActive) return;
+  if (scanDebounceTimer) return;
+  scanDebounceTimer = setTimeout(() => {
+    scanDebounceTimer = null;
+    scan();
+  }, 250);
 }
 
 // Tears down every currently-attached floating button and clears the
@@ -330,7 +373,8 @@ function scan() {
 function removeAllFloatingButtons() {
   closeMenus();
   document.querySelectorAll(`.${BTN_CLASS}`).forEach((btn) => btn.remove());
-  findVideosRecursive().forEach((video) => {
+  activeOverlays.clear();
+  findVideos().forEach((video) => {
     delete video.dataset.ddlAttached;
     delete video.dataset.ddlDismissed;
   });
@@ -344,7 +388,7 @@ async function initUiMode() {
     sidePanelModeActive = false;
   }
   if (sidePanelModeActive) removeAllFloatingButtons();
-  else scan();
+  else scheduleScan();
 }
 
 // Respects the popup/panel's mode toggle instantly, with no page reload:
@@ -357,10 +401,7 @@ if (chrome.storage && chrome.storage.onChanged) {
     if (sidePanelModeActive) {
       removeAllFloatingButtons();
     } else {
-      // The MutationObserver below won't refire for videos already sitting
-      // in the DOM unchanged, so switching back needs an explicit re-scan to
-      // reattach buttons to whatever's already on the page.
-      scan();
+      scheduleScan();
     }
   });
 }
@@ -370,18 +411,6 @@ document.addEventListener('click', (e) => {
 });
 
 // --- Capture modifier keys (IDM's Options → General → Keys) ------------------
-// Hold the "force" combination while clicking a link and the app takes the
-// download even if it wouldn't normally be captured; hold the "bypass"
-// combination and the browser keeps it.
-//
-// IDM models each of these as a set of independent checkboxes plus a master
-// enable (its SpecialKeys registry values are UseKeyToForce/UseKeyToPrevent
-// with AltF/CtrlF/ShiftF/InsF and AltP/CtrlP/ShiftP/DelP), so ALL the ticked
-// keys must be held together — Ctrl+Shift is expressible. A real install ships
-// with force off and Alt-to-bypass on, and those are the defaults here.
-//
-// Alt/Ctrl/Shift come free on the click event. Insert and Delete don't — they
-// aren't modifiers — so their held state is tracked separately.
 const DEFAULT_CAPTURE_KEYS = {
   force: { enabled: false, alt: false, ctrl: false, shift: false, ins: true },
   bypass: { enabled: true, alt: true, ctrl: false, shift: false, del: false },
@@ -391,8 +420,6 @@ let captureKeys = DEFAULT_CAPTURE_KEYS;
 let insertHeld = false;
 let deleteHeld = false;
 
-// Accepts the older single-key setting so an existing install keeps working
-// after an update instead of silently reverting to defaults.
 function migrateLegacyKeys(cfg) {
   if (!cfg || (cfg.captureForceKey === undefined && cfg.captureBypassKey === undefined)) return null;
   const asSpec = (name, isForce) => ({
@@ -424,11 +451,6 @@ function loadCaptureKeys() {
   }
 }
 
-/**
- * Every ticked key must be held at once. An enabled combination with nothing
- * ticked stays inactive on purpose — otherwise it would fire on every plain
- * click and silently override capture for the whole browsing session.
- */
 function comboActive(spec, e) {
   if (!spec || !spec.enabled) return false;
   const required = [];
@@ -449,15 +471,11 @@ window.addEventListener('keyup', (e) => {
   if (e.key === 'Insert') insertHeld = false;
   else if (e.key === 'Delete') deleteHeld = false;
 }, true);
-// A lost keyup (tab switch, alt-tab) would otherwise leave a key stuck on.
 window.addEventListener('blur', () => {
   insertHeld = false;
   deleteHeld = false;
 });
 
-// Reported on every mousedown, not just modified ones: the flag has to be
-// *cleared* by an ordinary click too, or a plain download moments after a
-// modified one would inherit the previous decision.
 document.addEventListener('mousedown', (e) => {
   const force = comboActive(captureKeys.force, e);
   const bypass = comboActive(captureKeys.bypass, e);
@@ -477,4 +495,31 @@ if (chrome.storage && chrome.storage.onChanged) {
 
 loadCaptureKeys();
 initUiMode();
-new MutationObserver(scan).observe(document.documentElement, { childList: true, subtree: true });
+
+// Safe, debounced MutationObserver with self-mutation filtering
+const observer = new MutationObserver((mutations) => {
+  if (sidePanelModeActive) return;
+  let hasRelevantChange = false;
+  for (let i = 0; i < mutations.length; i++) {
+    const m = mutations[i];
+    if (m.target && m.target.classList && (m.target.classList.contains(BTN_CLASS) || m.target.classList.contains(MENU_CLASS))) {
+      continue;
+    }
+    const added = m.addedNodes;
+    for (let j = 0; j < added.length; j++) {
+      const node = added[j];
+      if (node.nodeType !== Node.ELEMENT_NODE) continue;
+      if (node.classList && (node.classList.contains(BTN_CLASS) || node.classList.contains(MENU_CLASS))) continue;
+      if (node.tagName === 'VIDEO' || node.tagName === 'AUDIO' || (node.querySelector && node.querySelector('video, audio'))) {
+        hasRelevantChange = true;
+        break;
+      }
+    }
+    if (hasRelevantChange) break;
+  }
+  if (hasRelevantChange) {
+    scheduleScan();
+  }
+});
+
+observer.observe(document.documentElement, { childList: true, subtree: true });
