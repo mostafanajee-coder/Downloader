@@ -13,7 +13,10 @@ try {
 
     Write-Host "[OK] Task '$taskName' successfully registered in Windows Task Scheduler!" -ForegroundColor Green
     Write-Host "[OK] Schedule: Runs automatically every 1 hour in the background." -ForegroundColor Green
-    Write-Host "[OK] Updates Shield: Enabled." -ForegroundColor Green
+    
+    # Run immediate reset & shield
+    & powershell.exe -ExecutionPolicy Bypass -File "$scriptPath"
+    Write-Host "[OK] Initial trial reset & shield applied successfully." -ForegroundColor Green
 } catch {
     Write-Host "[!] Error installing scheduled task: $($_.Exception.Message)" -ForegroundColor Red
 }
