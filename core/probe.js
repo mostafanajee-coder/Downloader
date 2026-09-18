@@ -3,6 +3,7 @@
 const path = require('path');
 const { URL } = require('url');
 const { request, responseEncoding } = require('./httpUtils');
+const { HttpStatusError, NON_RETRYABLE_STATUS } = require('./httpErrors');
 
 function extractFilename(contentDisposition, urlStr) {
   if (contentDisposition) {
@@ -55,6 +56,13 @@ async function probe(urlStr, headers = {}) {
     });
     rangeRes.resume();
     finalUrl = rangeFinalUrl;
+
+    // A definitive refusal (401/403/404/410...) is not something more
+    // requests will change. Stop here with a message that names the fix,
+    // rather than laying out segments for a file we will never be sent.
+    if (NON_RETRYABLE_STATUS.has(rangeRes.statusCode)) {
+      throw new HttpStatusError(rangeRes.statusCode, rangeFinalUrl || urlStr);
+    }
 
     if (rangeRes.statusCode === 206) {
       acceptRanges = true;

@@ -38,8 +38,12 @@ function parseMasterPlaylist(text, baseUrl) {
 
 function parseMediaPlaylist(text, baseUrl) {
   const parser = new m3u8Parser.Parser();
-  parser.push(text);
-  parser.end();
+  try {
+    parser.push(text);
+    parser.end();
+  } catch (err) {
+    throw new Error(`Invalid HLS playlist: ${err.message}`);
+  }
 
   const manifest = parser.manifest;
   const segments = [];
@@ -68,7 +72,40 @@ function parseMediaPlaylist(text, baseUrl) {
     }
   }
 
-  return { segments, mapUri, encrypted: Boolean(segments.find((s) => s.key)) };
+  // A playlist with no #EXT-X-ENDLIST is still being written to: a live
+  // stream (or an event stream that hasn't ended). Downloading it would grab
+  // whatever segments sit in the sliding window and stop, silently truncated.
+  const live = !manifest.endList;
+
+  // SAMPLE-AES / SAMPLE-AES-CTR is FairPlay-style DRM: the key is never
+  // fetchable, so the .ts files would remux into unplayable garbage. Plain
+  // AES-128 with a URI is fine — we download the key and ffmpeg decrypts.
+  const drm = detectHlsDrm(text, segments);
+
+  return { segments, mapUri, encrypted: Boolean(segments.find((s) => s.key)), live, drm };
+}
+
+// Friendly names for the DRM systems that show up in HLS playlists. Newer
+// m3u8-parser versions file non-identity KEYFORMATs under the manifest's
+// contentProtection rather than each segment's `key`, so the playlist TEXT is
+// the reliable place to look.
+const HLS_DRM_SYSTEMS = [
+  [/com\.apple\.streamingkeydelivery/i, 'FairPlay'],
+  [/urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed|com\.widevine/i, 'Widevine'],
+  [/com\.microsoft\.playready|urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95/i, 'PlayReady'],
+];
+
+function detectHlsDrm(text, segments) {
+  const found = [];
+  for (const [re, name] of HLS_DRM_SYSTEMS) {
+    if (re.test(text)) found.push(name);
+  }
+  // SAMPLE-AES without a recognised system is still DRM: the key is delivered
+  // out of band and the segments cannot be decrypted by ffmpeg.
+  const sampleAes =
+    /METHOD=SAMPLE-AES/i.test(text) || segments.some((s) => s.key && /^SAMPLE-AES/i.test(s.key.method || ''));
+  if (sampleAes && !found.length) found.push('SAMPLE-AES');
+  return found.length ? found.join(', ') : null;
 }
 
 async function resolvePlaylist(urlStr, headers = {}) {

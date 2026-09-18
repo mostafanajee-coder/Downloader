@@ -81,6 +81,17 @@ class HlsDownloadTask extends EventEmitter {
       throw new Error('No segments found in HLS playlist');
     }
 
+    // Refuse up front rather than producing a file that looks finished and
+    // won't play. IDM shows exactly these two refusals.
+    if (playlist.drm) {
+      throw new Error(`This stream is DRM-protected (${playlist.drm}) and cannot be downloaded.`);
+    }
+    if (playlist.live) {
+      throw new Error(
+        'This is a live stream with no end marker. Downloading it would capture only the current window; live recording is not supported.'
+      );
+    }
+
     this.segments = playlist.segments;
     this.mapUri = playlist.mapUri;
 

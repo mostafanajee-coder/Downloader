@@ -1,13 +1,16 @@
 'use strict';
 
 const path = require('path');
-const { app, BrowserWindow, ipcMain, dialog, Menu, Tray, nativeImage, shell } = require('electron');
+const fs = require('fs');
+const { app, BrowserWindow, ipcMain, dialog, Menu, Tray, nativeImage, shell, powerSaveBlocker, clipboard } = require('electron');
 const notifier = require('node-notifier');
 
 const { Manager } = require('../core/Manager');
 const { createBridgeServer } = require('../bridge/server');
 const { ConfigManager } = require('../core/config');
 const { GrabberHost } = require('../core/grabberHost');
+const { ScheduleManager } = require('../core/scheduler');
+const { PowerManager } = require('../core/powerManager');
 
 const userDataDir = app.getPath('userData');
 const stateDir = path.join(userDataDir, 'downloader-state');
@@ -19,6 +22,11 @@ let mainWindow;
 let tray;
 let config;
 let grabber; // the in-flight SiteGrabber crawl, if any (one at a time)
+let scheduler;
+let power;
+let powerBlockerId = null; // powerSaveBlocker handle while downloads are active
+let clipboardTimer = null;
+let lastClipboardText = null;
 
 function sendToWindow(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -76,6 +84,12 @@ function wireManagerEvents() {
   manager.on('duplicate-detected', (info) => sendToWindow('queue:duplicate', info));
   manager.on('queues-changed', (queues) => sendToWindow('queues:changed', queues));
 
+  // Keep the machine awake while anything is transferring, and mirror overall
+  // progress onto the taskbar button. Both are things IDM does and both are
+  // invisible until they're missing (a laptop that sleeps at 80%).
+  manager.on('updated', () => syncActivityState());
+  manager.on('removed', () => syncActivityState());
+
   const notifiedSet = new Set();
   manager.on('updated', (item) => {
     if (item.status === 'completed' && !notifiedSet.has(item.id)) {
@@ -83,6 +97,95 @@ function wireManagerEvents() {
       notifyUser('Download Complete', `${item.filename || 'A file'} has finished downloading.`);
     }
   });
+}
+
+// Aggregate running-download state -> powerSaveBlocker + taskbar progress.
+function syncActivityState() {
+  if (!manager) return;
+  const items = manager.list();
+  const running = items.filter((i) => i.status === 'running');
+
+  // powerSaveBlocker: hold it only while something is actually moving.
+  if (running.length && powerBlockerId === null) {
+    powerBlockerId = powerSaveBlocker.start('prevent-app-suspension');
+  } else if (!running.length && powerBlockerId !== null) {
+    powerSaveBlocker.stop(powerBlockerId);
+    powerBlockerId = null;
+  }
+
+  // Taskbar progress: weighted by bytes when sizes are known, else by percent.
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (!running.length) {
+      mainWindow.setProgressBar(-1);
+      return;
+    }
+    let done = 0;
+    let total = 0;
+    for (const i of running) {
+      const p = i.progress || {};
+      if (i.size && p.downloaded != null) {
+        done += p.downloaded;
+        total += i.size;
+      } else if (p.percent != null) {
+        done += p.percent;
+        total += 100;
+      }
+    }
+    if (total > 0) mainWindow.setProgressBar(Math.max(0, Math.min(1, done / total)));
+    else mainWindow.setProgressBar(2, { mode: 'indeterminate' });
+  }
+}
+
+// IDM's "Monitor the clipboard for downloadable URLs": when a URL that looks
+// like a file is copied, offer it in the Add URL dialog. The renderer decides
+// what to do with it; here we only detect and de-duplicate.
+const CLIPBOARD_URL = /^(https?|ftp):\/\/\S+$/i;
+function clipboardLooksDownloadable(text) {
+  if (!text || text.length > 2048) return false;
+  const t = text.trim();
+  if (!CLIPBOARD_URL.test(t)) return false;
+  if (/\.(m3u8|mpd)(\?|$)/i.test(t)) return true;
+  const types = String(config ? config.get('fileTypes') || '' : '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((x) => x.toLowerCase().replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*'));
+  let ext = '';
+  try {
+    const pathname = new URL(t).pathname;
+    const last = pathname.split('/').pop() || '';
+    ext = last.includes('.') ? last.split('.').pop().toLowerCase() : '';
+  } catch (e) {
+    return false;
+  }
+  return Boolean(ext) && types.some((pat) => new RegExp('^' + pat + '$').test(ext));
+}
+
+function syncClipboardMonitor() {
+  const wanted = Boolean(config && config.get('autoClipboard'));
+  if (wanted && !clipboardTimer) {
+    try {
+      lastClipboardText = clipboard.readText();
+    } catch (e) {
+      lastClipboardText = null;
+    }
+    clipboardTimer = setInterval(() => {
+      let text;
+      try {
+        text = clipboard.readText();
+      } catch (e) {
+        return;
+      }
+      if (text === lastClipboardText) return;
+      lastClipboardText = text;
+      if (clipboardLooksDownloadable(text)) {
+        sendToWindow('clipboard:url', text.trim());
+        showMainWindow();
+      }
+    }, 1000);
+  } else if (!wanted && clipboardTimer) {
+    clearInterval(clipboardTimer);
+    clipboardTimer = null;
+  }
 }
 
 // Best-effort system notification. Wrapped so a broken notifier backend
@@ -157,6 +260,25 @@ function createTray() {
     { type: 'separator' },
     { label: 'Resume all downloads', click: () => manager && manager.resumeAll() },
     { label: 'Pause all downloads', click: () => manager && manager.pauseAll() },
+    { type: 'separator' },
+    {
+      label: 'Speed Limiter',
+      type: 'checkbox',
+      checked: Boolean(config && config.get('speedLimiterEnabled')),
+      click: (item) => {
+        if (!config || !manager) return;
+        config.set('speedLimiterEnabled', item.checked);
+        manager.updateSpeedLimit();
+        sendToWindow('limiter:changed', { enabled: item.checked, kbps: Number(config.get('speedLimitKBps')) || 0 });
+      },
+    },
+    {
+      label: 'Options...',
+      click: () => {
+        showMainWindow();
+        sendToWindow('ui:open-options');
+      },
+    },
     { type: 'separator' },
     {
       label: 'Exit',
@@ -252,6 +374,26 @@ async function bootstrap() {
 
   wireManagerEvents();
 
+  power = new PowerManager({
+    exitApp: () => {
+      app.isQuitting = true;
+      app.quit();
+    },
+  });
+  scheduler = new ScheduleManager({ manager, config, power });
+  scheduler.on('fired', (e) => sendToWindow('schedule:event', { type: 'fired', ...e }));
+  scheduler.on('quota-exceeded', (e) => {
+    sendToWindow('schedule:event', { type: 'quota-exceeded', ...e });
+    notifyUser('Download quota reached', `${(e.usedBytes / 1048576).toFixed(0)} MB in ${e.hours}h - queues stopped.`);
+  });
+  scheduler.on('completion-action', (e) => {
+    sendToWindow('schedule:event', { type: 'completion-action', ...e });
+    showMainWindow();
+    notifyUser('Downloads finished', `The computer will ${e.action} in 30 seconds. Open the app to cancel.`);
+  });
+  scheduler.on('completion-action-cancelled', () => sendToWindow('schedule:event', { type: 'completion-action-cancelled' }));
+  syncClipboardMonitor();
+
   try {
     bridge = await createBridgeServer({ manager, port: 9333 });
   } catch (e) {
@@ -292,6 +434,9 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', async () => {
+  if (scheduler) scheduler.destroy();
+  if (clipboardTimer) clearInterval(clipboardTimer);
+  if (powerBlockerId !== null) powerSaveBlocker.stop(powerBlockerId);
   if (bridge) await bridge.stop();
 });
 
@@ -329,6 +474,68 @@ ipcMain.handle('config:set', (_event, newConfig) => {
   // Apply the (possibly changed) global speed limit to running downloads live.
   manager.updateSpeedLimit();
   manager.updateHttpSettings();
+  if (scheduler) scheduler.update();
+  syncClipboardMonitor();
+});
+
+// --- Scheduler / power ------------------------------------------------------
+ipcMain.handle('schedule:get', () => (scheduler ? scheduler.describe() : null));
+ipcMain.handle('schedule:set', (_event, schedule) => {
+  config.set('schedule', { ...(config.get('schedule') || {}), ...(schedule || {}) });
+  if (scheduler) scheduler.update();
+  return scheduler ? scheduler.describe() : null;
+});
+ipcMain.handle('schedule:cancelAction', () => {
+  if (power) power.cancelShutdown();
+  return scheduler ? scheduler.cancelPendingAction() : false;
+});
+
+// --- Speed limiter toggle (IDM: on/off with a remembered value) --------------
+ipcMain.handle('limiter:set', (_event, { enabled, kbps } = {}) => {
+  const patch = {};
+  if (typeof enabled === 'boolean') patch.speedLimiterEnabled = enabled;
+  if (kbps !== undefined && Number.isFinite(Number(kbps))) patch.speedLimitKBps = Math.max(0, Math.floor(Number(kbps)));
+  config.setAll(patch);
+  manager.updateSpeedLimit();
+  const state = { enabled: Boolean(config.get('speedLimiterEnabled')), kbps: Number(config.get('speedLimitKBps')) || 0 };
+  sendToWindow('limiter:changed', state);
+  return state;
+});
+
+// --- Export / import download list ------------------------------------------
+ipcMain.handle('list:export', async () => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export download list',
+    defaultPath: `downloads-${new Date().toISOString().slice(0, 10)}.json`,
+    filters: [{ name: 'Download list', extensions: ['json'] }],
+  });
+  if (result.canceled || !result.filePath) return { saved: false };
+  const data = manager.exportList();
+  fs.writeFileSync(result.filePath, JSON.stringify(data, null, 2), 'utf8');
+  return { saved: true, path: result.filePath, count: data.items.length };
+});
+
+ipcMain.handle('list:import', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import download list',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Download list', extensions: ['json'] },
+      { name: 'Plain URL list', extensions: ['txt'] },
+    ],
+  });
+  if (result.canceled || !result.filePaths.length) return { imported: false };
+  const file = result.filePaths[0];
+  const raw = fs.readFileSync(file, 'utf8');
+  let data;
+  if (/\.txt$/i.test(file)) {
+    // One URL per line, the format IDM's own import accepts.
+    data = { items: raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((url) => ({ url })) };
+  } else {
+    data = JSON.parse(raw);
+  }
+  const summary = manager.importList(data);
+  return { imported: true, path: file, ...summary };
 });
 
 ipcMain.handle('shell:openFile', (_event, filePath) => {

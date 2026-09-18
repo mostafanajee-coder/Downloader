@@ -4,48 +4,53 @@ const { exec } = require('child_process');
 const EventEmitter = require('events');
 
 /**
- * Power Manager for Windows Auto-Shutdown / Hibernate when downloads complete
+ * Executes the scheduler's "when done" actions. Nothing here is ever called
+ * without the scheduler's 30-second cancellable countdown in front of it.
+ *
+ * `exitApp` is injected by main.js because quitting an Electron app cleanly
+ * needs `app.quit()` with the tray's isQuitting flag set — this module must
+ * stay free of Electron so it can be unit-tested in plain Node.
  */
 class PowerManager extends EventEmitter {
-  constructor() {
+  constructor({ platform = process.platform, run = exec, exitApp = null } = {}) {
     super();
-    this.autoShutdownEnabled = false;
-    this.action = 'shutdown'; // 'shutdown', 'hibernate', 'sleep'
+    this.platform = platform;
+    this.run = run;
+    this.exitApp = exitApp;
   }
 
-  enableAutoShutdown(action = 'shutdown') {
-    this.autoShutdownEnabled = true;
-    this.action = action;
-    this.emit('status-changed', { enabled: true, action });
-  }
-
-  disableAutoShutdown() {
-    this.autoShutdownEnabled = false;
-    this.cancelPendingShutdown();
-    this.emit('status-changed', { enabled: false });
-  }
-
-  triggerPowerAction() {
-    if (!this.autoShutdownEnabled) return;
-
-    this.emit('power-action-triggered', { action: this.action });
-
-    if (process.platform === 'win32') {
-      if (this.action === 'shutdown') {
-        exec('shutdown /s /f /t 30 /c "Downloader: All queue downloads completed. System shutting down in 30 seconds."');
-      } else if (this.action === 'hibernate') {
-        exec('shutdown /h');
-      } else if (this.action === 'sleep') {
-        exec('rundll32.exe powrprof.dll,SetSuspendState 0,1,0');
-      }
+  perform(action) {
+    this.emit('performing', { action });
+    switch (action) {
+      case 'exit':
+        if (this.exitApp) this.exitApp();
+        return true;
+      case 'shutdown':
+        return this._os(
+          'shutdown /s /f /t 30 /c "Downloader: all scheduled downloads finished. Shutting down in 30 seconds."',
+          'shutdown -h +1'
+        );
+      case 'hibernate':
+        return this._os('shutdown /h', 'systemctl hibernate');
+      case 'sleep':
+        return this._os('rundll32.exe powrprof.dll,SetSuspendState 0,1,0', 'systemctl suspend');
+      default:
+        return false;
     }
   }
 
-  cancelPendingShutdown() {
-    if (process.platform === 'win32') {
-      exec('shutdown /a', () => {});
-    }
+  /** Abort a Windows shutdown that was issued with a delay. */
+  cancelShutdown() {
+    if (this.platform === 'win32') this.run('shutdown /a', () => {});
+  }
+
+  _os(winCmd, unixCmd) {
+    const cmd = this.platform === 'win32' ? winCmd : unixCmd;
+    this.run(cmd, (err) => {
+      if (err) this.emit('failed', { command: cmd, error: err.message });
+    });
+    return true;
   }
 }
 
-module.exports = new PowerManager();
+module.exports = { PowerManager };

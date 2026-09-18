@@ -204,6 +204,17 @@ function parseMpd(xml, manifestUrl) {
   const durationSec = parseDuration(mpd.attrs.mediaPresentationDuration);
   const mpdBase = resolveBase(manifestUrl, [baseUrlOf(mpd)]);
 
+  // type="dynamic" is a live presentation: no fixed duration, a segment
+  // timeline that keeps growing. The static download path would compute a
+  // nonsense segment count from a missing/zero duration.
+  const live = String(mpd.attrs.type || 'static').toLowerCase() === 'dynamic';
+
+  // Any <ContentProtection> means the media is encrypted. The bare
+  // mp4protection:2011 element just signals CENC; a system-specific one names
+  // the DRM. Either way the fragments can't be muxed into a playable file.
+  const drmSystems = collectDrm(mpd);
+  const drm = drmSystems.length ? drmSystems.join(', ') : null;
+
   const period = find(mpd, 'Period');
   if (!period) throw new Error('MPD has no Period');
   const periodBase = resolveBase(mpdBase, [baseUrlOf(period)]);
@@ -243,7 +254,26 @@ function parseMpd(xml, manifestUrl) {
   video.sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bandwidth || 0) - (a.bandwidth || 0));
   audio.sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0));
 
-  return { durationSec, video, audio };
+  return { durationSec, video, audio, live, drm, drmSystems };
+}
+
+const DRM_SCHEMES = {
+  'edef8ba9-79d6-4ace-a3c8-27dcd51d21ed': 'Widevine',
+  '9a04f079-9840-4286-ab92-e65be0885f95': 'PlayReady',
+  '94ce86fb-07ff-4f43-adb8-93d2fa968ca2': 'FairPlay',
+  '1077efec-c0b2-4d02-ace3-3c1e52e2fb4b': 'ClearKey',
+};
+
+function collectDrm(node, out = []) {
+  if (!node) return out;
+  if (node.name === 'ContentProtection') {
+    const scheme = String(node.attrs.schemeIdUri || '').toLowerCase();
+    const uuid = scheme.replace(/^urn:uuid:/, '');
+    const name = DRM_SCHEMES[uuid] || (scheme.includes('mp4protection') ? 'CENC' : scheme || 'unknown');
+    if (!out.includes(name)) out.push(name);
+  }
+  for (const child of node.children || []) collectDrm(child, out);
+  return out;
 }
 
 /** Pick one video representation (by index) and the best audio, if separate. */

@@ -21,6 +21,10 @@ function configureHttp({ allowInsecureTLS: insecure } = {}) {
 const client = got.extend({
   retry: { limit: 0 }, // We handle retries manually in DownloadTask
   timeout: { request: 30000 },
+  // A download engine inspects status codes itself (206 vs 200, 401 -> "add a
+  // Site Login"). With the default, got rejected 4xx/5xx with its own generic
+  // HTTPError before any of that logic ran.
+  throwHttpErrors: false,
 });
 
 // Strips any caller-supplied Accept-Encoding (whatever its casing) and demands

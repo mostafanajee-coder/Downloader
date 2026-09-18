@@ -438,6 +438,66 @@ body.col-resizing * {
   flex: 0 0 auto;
 }
 
+/* --- Sortable column headers ----------------------------------------------- */
+.idm-table th.sortable .th-label {
+  cursor: default;
+  padding-right: 12px;
+  position: relative;
+}
+
+.idm-table th.sortable:hover {
+  background: linear-gradient(180deg, #3d3d3d 0%, #2e2e2e 100%);
+}
+
+/* Win32 list views draw the sort glyph centred above the header text; the
+   compact alternative (a trailing arrow) reads better at 11px. */
+.idm-table th.sort-asc .th-label::after,
+.idm-table th.sort-desc .th-label::after {
+  content: "\25B4";
+  position: absolute;
+  right: 0;
+  top: 0;
+  color: var(--idm-win-select);
+}
+
+.idm-table th.sort-desc .th-label::after {
+  content: "\25BE";
+}
+
+/* --- Speed limiter indicator in the status bar ----------------------------- */
+#status-limiter {
+  cursor: default;
+}
+
+#status-limiter.limiter-on {
+  color: #e0a33a;
+  font-weight: bold;
+}
+
+#status-limiter.limiter-off {
+  color: #888;
+}
+
+/* --- Scheduler dialog ------------------------------------------------------- */
+.sched-grid {
+  display: grid;
+  grid-template-columns: max-content 160px;
+  gap: 6px 10px;
+  align-items: center;
+}
+
+.sched-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.sched-days label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 /* --- Queues ---------------------------------------------------------------- */
 .queue-table {
   width: 100%;

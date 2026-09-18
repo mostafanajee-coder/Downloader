@@ -229,6 +229,8 @@
       <span id="status-speed">Total speed: 0 B/s</span>
       <span class="status-sep">|</span>
       <span id="status-queue" class="queue-stopped">Queue: Stopped</span>
+      <span class="status-sep">|</span>
+      <span id="status-limiter" class="limiter-off" title="Speed Limiter (click to toggle)">Limit: off</span>
     </div>
     <div class="status-right">
       <span id="status-total">0 items</span>
@@ -264,6 +266,114 @@
     <div class="ctx-sep"></div>
     <div class="ctx-item" id="ctx-progress">Show download progress...</div>
     <div class="ctx-item" id="ctx-properties">Properties...</div>
+  </div>
+
+  <!-- Speed Limiter (IDM: on/off switch with a remembered value) -->
+  <div id="limiter-modal" class="idm-modal hidden">
+    <div class="idm-dialog" style="width: 380px;">
+      <div class="dialog-header">
+        <span>Speed Limiter</span>
+        <button id="limiter-close" class="dialog-close">&times;</button>
+      </div>
+      <div class="dialog-body">
+        <label class="opt-check" style="display:flex;"><input type="checkbox" id="limiter-enabled" /> Turn on speed limiter</label>
+        <div class="opt-row" style="margin-top:10px;">
+          <label for="limiter-kbps" style="min-width:150px;">Maximum download speed</label>
+          <input id="limiter-kbps" type="number" min="1" step="10" class="opt-input" style="max-width:110px;" />
+          <span>KB/s</span>
+        </div>
+        <div class="opt-hint">Caps the total transfer rate across every active download. The value is remembered while the limiter is off.</div>
+      </div>
+      <div class="dialog-footer">
+        <button id="limiter-apply-btn" class="idm-btn primary">OK</button>
+        <button id="limiter-cancel-btn" class="idm-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scheduler (runs in the main process; survives the window being hidden) -->
+  <div id="scheduler-modal" class="idm-modal hidden">
+    <div class="idm-dialog" style="width: 520px;">
+      <div class="dialog-header">
+        <span>Scheduler</span>
+        <button id="scheduler-close" class="dialog-close">&times;</button>
+      </div>
+      <div class="dialog-body">
+        <label class="opt-check" style="display:flex;"><input type="checkbox" id="sched-enabled" /> Enable scheduler</label>
+
+        <div class="opt-group" style="margin-top:10px;">
+          <div class="opt-group-title">Queue</div>
+          <select id="sched-queue" class="opt-input" style="max-width:260px;"></select>
+        </div>
+
+        <div class="opt-group">
+          <div class="opt-group-title">Times (24-hour)</div>
+          <div class="sched-grid">
+            <label for="sched-start">Start the queue at</label>
+            <input id="sched-start" type="time" class="opt-input" />
+            <label for="sched-stop">Stop the queue at</label>
+            <input id="sched-stop" type="time" class="opt-input" />
+          </div>
+          <div class="opt-hint">Leave either blank to skip it.</div>
+        </div>
+
+        <div class="opt-group">
+          <div class="opt-group-title">On these days</div>
+          <div class="sched-days" id="sched-days">
+            <label><input type="checkbox" data-day="1" /> Mon</label>
+            <label><input type="checkbox" data-day="2" /> Tue</label>
+            <label><input type="checkbox" data-day="3" /> Wed</label>
+            <label><input type="checkbox" data-day="4" /> Thu</label>
+            <label><input type="checkbox" data-day="5" /> Fri</label>
+            <label><input type="checkbox" data-day="6" /> Sat</label>
+            <label><input type="checkbox" data-day="0" /> Sun</label>
+          </div>
+        </div>
+
+        <div class="opt-group">
+          <div class="opt-group-title">When the queue finishes</div>
+          <select id="sched-oncomplete" class="opt-input" style="max-width:260px;">
+            <option value="none">Do nothing</option>
+            <option value="exit">Exit the application</option>
+            <option value="shutdown">Turn off the computer</option>
+            <option value="hibernate">Hibernate</option>
+            <option value="sleep">Sleep (stand by)</option>
+          </select>
+          <div class="opt-hint">A 30-second countdown appears first; you can cancel it from the app.</div>
+        </div>
+
+        <div class="opt-group">
+          <div class="opt-group-title">Download limits</div>
+          <label class="opt-check" style="display:flex;"><input type="checkbox" id="sched-quota-enabled" /> Stop all queues after downloading</label>
+          <div class="opt-row" style="margin-top:6px;">
+            <input id="sched-quota-mb" type="number" min="1" step="50" class="opt-input" style="max-width:100px;" />
+            <span>MB within</span>
+            <input id="sched-quota-hours" type="number" min="1" max="168" step="1" class="opt-input" style="max-width:80px;" />
+            <span>hours</span>
+          </div>
+        </div>
+      </div>
+      <div class="dialog-footer">
+        <button id="scheduler-apply-btn" class="idm-btn primary">OK</button>
+        <button id="scheduler-cancel-btn" class="idm-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pending power action countdown -->
+  <div id="poweraction-modal" class="idm-modal hidden">
+    <div class="idm-dialog" style="width: 400px;">
+      <div class="dialog-header">
+        <span>Downloads finished</span>
+      </div>
+      <div class="dialog-body">
+        <p id="poweraction-text" style="margin-bottom:8px;"></p>
+        <div class="idm-progress" style="height:14px;"><div id="poweraction-fill" class="idm-progress-fill paused" style="width:100%"></div></div>
+      </div>
+      <div class="dialog-footer">
+        <button id="poweraction-cancel-btn" class="idm-btn primary">Cancel</button>
+      </div>
+    </div>
   </div>
 
   <!-- Queue Manager: named queues with their own concurrency and run state -->
@@ -517,6 +627,20 @@
               <span style="color:#aab;">KB/s &nbsp; (0 = unlimited)</span>
             </div>
             <div class="opt-hint">Caps the aggregate transfer rate across all active downloads.</div>
+          </div>
+          <div class="opt-group">
+            <div class="opt-group-title">Site logins (sent as HTTP Basic auth for matching hosts)</div>
+            <table class="queue-table" id="logins-table">
+              <thead><tr><th>Host (e.g. nas.local or *.example.com)</th><th style="width:130px;">Username</th><th style="width:130px;">Password</th><th style="width:60px;"></th></tr></thead>
+              <tbody id="logins-tbody"></tbody>
+            </table>
+            <div class="opt-row" style="margin-top:6px;">
+              <input id="login-host" type="text" class="opt-input" placeholder="host" />
+              <input id="login-user" type="text" class="opt-input" placeholder="username" style="max-width:130px;" />
+              <input id="login-pass" type="password" class="opt-input" placeholder="password" style="max-width:130px;" />
+              <button id="login-add-btn" class="idm-btn">Add</button>
+            </div>
+            <div class="opt-hint">Applied to new downloads. A 401 error on an existing download names the host to add here; then Resume it.</div>
           </div>
           <div class="opt-group">
             <div class="opt-group-title">Max simultaneous downloads</div>

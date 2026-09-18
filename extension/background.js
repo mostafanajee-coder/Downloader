@@ -180,14 +180,28 @@ function parseMasterVariants(text, baseUrl) {
   return variants;
 }
 
+// DRM on HLS shows up as SAMPLE-AES (FairPlay) or a vendor KEYFORMAT; a
+// playlist without #EXT-X-ENDLIST is live. Both are flagged so the panel can
+// tell the user instead of the app failing after they click Download.
+function classifyHlsText(text) {
+  const drm =
+    /METHOD=SAMPLE-AES/i.test(text) ||
+    /KEYFORMAT="?[^",]*(streamingkeydelivery|widevine|playready)/i.test(text) ||
+    /urn:uuid:edef8ba9/i.test(text);
+  const isMedia = /#EXTINF/i.test(text);
+  const live = isMedia && !/#EXT-X-ENDLIST/i.test(text);
+  return { drm, live };
+}
+
 async function inspectManifestBackground(url) {
   try {
     const res = await fetch(url);
     const text = await res.text();
+    const flags = classifyHlsText(text);
     if (text.includes('#EXT-X-STREAM-INF')) {
-      return { type: 'master', variants: parseMasterVariants(text, res.url) };
+      return { type: 'master', variants: parseMasterVariants(text, res.url), ...flags };
     }
-    return { type: 'media', url };
+    return { type: 'media', url, ...flags };
   } catch {
     return { type: 'media', url };
   }
@@ -202,12 +216,19 @@ async function inspectMpdVariants(url) {
     const fetchPromise = (async () => {
       const res = await fetch(url);
       const text = await res.text();
-      if (typeof self.parseMpdVariants !== 'function') return { video: [] };
-      return self.parseMpdVariants(text);
+      const flags = {
+        drm: /<ContentProtection\b/i.test(text),
+        live: /<MPD\b[^>]*\btype\s*=\s*"dynamic"/i.test(text),
+      };
+      if (typeof self.parseMpdVariants !== 'function') return { video: [], ...flags };
+      return { ...self.parseMpdVariants(text), ...flags };
     })();
     const timeoutPromise = new Promise((r) => setTimeout(() => r({ video: [] }), 1500));
     const parsed = await Promise.race([fetchPromise, timeoutPromise]);
-    return parsed.video || [];
+    const list = parsed.video || [];
+    list.drm = Boolean(parsed.drm);
+    list.live = Boolean(parsed.live);
+    return list;
   } catch (e) {
     return [];
   }
@@ -779,14 +800,15 @@ async function buildMediaSnapshot(tabId) {
       // height-sorted list, matching exactly what core/dash.js's
       // selectTracks(variantIndex) will pick on the app side.
       const variants = await inspectMpdVariants(mediaUrl);
+      const dashBlocked = variants.drm ? 'DRM-protected' : variants.live ? 'live stream' : null;
       if (variants.length) {
         variants.forEach((v, idx) => {
           const quality = v.height ? `${v.height}p` : v.bandwidth ? `${Math.round(v.bandwidth / 1000)} kbps` : 'Auto';
           const detail = v.width && v.height ? `${v.width}x${v.height}` : 'DASH';
-          const label = `${titleClean} - ${quality} (${detail})`;
+          const label = `${titleClean} - ${quality} (${detail})${dashBlocked ? ` [${dashBlocked}]` : ''}`;
           if (!seenLabels.has(label)) {
             seenLabels.add(label);
-            parsedItems.push({ label, kind: 'dash', url: mediaUrl, variantIndex: idx });
+            parsedItems.push({ label, kind: 'dash', url: mediaUrl, variantIndex: idx, blocked: dashBlocked });
           }
         });
       } else {
@@ -810,12 +832,13 @@ async function buildMediaSnapshot(tabId) {
       console.error('inspectManifestBackground failed for', mediaUrl, e);
     }
 
+    const hlsBlocked = info.drm ? 'DRM-protected' : info.live ? 'live stream' : null;
     if (info.type === 'master' && info.variants.length) {
       info.variants.forEach((v, idx) => {
-        const label = `${titleClean} - ${v.quality} (${v.resolution || 'HLS'})`;
+        const label = `${titleClean} - ${v.quality} (${v.resolution || 'HLS'})${hlsBlocked ? ` [${hlsBlocked}]` : ''}`;
         if (!seenLabels.has(label)) {
           seenLabels.add(label);
-          parsedItems.push({ label, kind: 'hls', url: mediaUrl, variantIndex: idx });
+          parsedItems.push({ label, kind: 'hls', url: mediaUrl, variantIndex: idx, blocked: hlsBlocked });
         }
       });
     } else {

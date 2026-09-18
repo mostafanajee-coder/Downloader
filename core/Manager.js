@@ -15,6 +15,7 @@ const { getCategoryForUrl } = require('./categories');
 const { RateLimiter } = require('./rateLimiter');
 const { configureHttp, configureProxy } = require('./httpUtils');
 const { discardWorkspace } = require('./workspace');
+const { applySiteLogin } = require('./siteLogins');
 
 const MAX_CONCURRENT_DOWNLOADS = 4;
 
@@ -386,6 +387,11 @@ class Manager extends EventEmitter {
   // the current value at start time.
   _speedLimitBytes() {
     if (!this.config) return 0;
+    // The limiter is a switch with a remembered value (IDM's sls_maxSpeed +
+    // on/off): a stored KB/s figure only applies while the switch is on. An
+    // older config without the flag but with a non-zero value keeps working.
+    const enabled = this.config.get('speedLimiterEnabled');
+    if (enabled === false) return 0;
     const kbps = Number(this.config.get('speedLimitKBps')) || 0;
     return kbps > 0 ? kbps * 1024 : 0;
   }
@@ -463,13 +469,19 @@ class Manager extends EventEmitter {
         continue;
       }
 
+      // IDM's Site Logins: a stored username/password for this host becomes a
+      // Basic Authorization header on every request for the download. Never
+      // overrides a header the caller already set (a captured Bearer token).
+      const siteLogins = this.config ? this.config.get('siteLogins') : null;
+      const effectiveHeaders = applySiteLogin(siteLogins, singleUrl, headers);
+
       const item = {
         id,
         kind, // 'file' | 'hls' | 'dash'
         url: singleUrl,
         destPath: destPath || null,
         destDir: finalDestDir,
-        headers,
+        headers: effectiveHeaders,
         connections: effectiveConnections,
         variantIndex,
         suggestedFilename: sanitizeFilename(suggestedFilename, null),
@@ -561,6 +573,76 @@ class Manager extends EventEmitter {
 
   list() {
     return Array.from(this.items.values()).map((item) => this._publicView(item));
+  }
+
+  /**
+   * IDM "Export download list": everything needed to re-create the queue
+   * elsewhere. Headers are included because a captured download is often
+   * useless without its cookies/referer; the caller decides where the file
+   * goes and should treat it as sensitive for that reason.
+   */
+  exportList() {
+    return {
+      format: 'downloader-list',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      queues: this.listQueues().map((q) => ({ id: q.id, name: q.name, maxConcurrent: q.maxConcurrent })),
+      items: Array.from(this.items.values()).map((item) => ({
+        url: item.url,
+        kind: item.kind,
+        filename: item.filename || null,
+        suggestedFilename: item.suggestedFilename || null,
+        destDir: item.destDir || null,
+        headers: item.headers || {},
+        connections: item.connections,
+        variantIndex: item.variantIndex || 0,
+        queueId: item.queueId || MAIN_QUEUE_ID,
+        status: item.status,
+      })),
+    };
+  }
+
+  /**
+   * IDM "Import download list". Items are added ON HOLD so a large import
+   * doesn't start dozens of downloads the moment the file is opened; the user
+   * starts the queue when ready. Unknown queues are created by name.
+   * Returns { added, skipped }.
+   */
+  importList(data) {
+    if (!data || !Array.isArray(data.items)) throw new Error('Not a download list file');
+
+    // Map exported queue ids to local ones, creating missing custom queues.
+    const queueMap = new Map([[MAIN_QUEUE_ID, MAIN_QUEUE_ID], [SYNC_QUEUE_ID, SYNC_QUEUE_ID]]);
+    for (const q of data.queues || []) {
+      if (!q || !q.id || queueMap.has(q.id)) continue;
+      const existing = Array.from(this.queues.values()).find((x) => x.name === q.name);
+      queueMap.set(q.id, existing ? existing.id : this.createQueue(q.name || 'Imported', q.maxConcurrent || 0));
+    }
+
+    let added = 0;
+    let skipped = 0;
+    for (const entry of data.items) {
+      if (!entry || typeof entry.url !== 'string' || !/^(https?|ftp):\/\//i.test(entry.url)) {
+        skipped++;
+        continue;
+      }
+      const ids = this.add({
+        url: entry.url,
+        kind: entry.kind || 'file',
+        suggestedFilename: entry.suggestedFilename || entry.filename || undefined,
+        destDir: entry.destDir || undefined,
+        headers: entry.headers && typeof entry.headers === 'object' ? entry.headers : {},
+        connections: entry.connections || undefined,
+        variantIndex: entry.variantIndex || 0,
+        queueId: queueMap.get(entry.queueId) || MAIN_QUEUE_ID,
+        startNow: false,
+        allowDuplicate: false,
+      });
+      const count = Array.isArray(ids) ? ids.length : ids ? 1 : 0;
+      if (count) added += count;
+      else skipped++;
+    }
+    return { added, skipped };
   }
 
   _publicView(item) {

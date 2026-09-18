@@ -75,6 +75,13 @@ class DashDownloadTask extends EventEmitter {
 
     const manifestText = await this._fetchText(this.mpdUrl);
     const parsed = parseMpd(manifestText, this.mpdUrl);
+    if (parsed.drm) {
+      throw new Error(`This stream is DRM-protected (${parsed.drm}) and cannot be downloaded.`);
+    }
+    if (parsed.live) {
+      throw new Error('This is a live MPEG-DASH presentation (type="dynamic"); live recording is not supported.');
+    }
+
     const { video, audio } = selectTracks(parsed, this.variantIndex);
 
     if (!video) throw new Error('No video representation found in MPEG-DASH manifest');

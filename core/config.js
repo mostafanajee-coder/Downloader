@@ -35,7 +35,22 @@ const DEFAULT_CONFIG = {
   maxConnections: 8,
   maxConcurrentDownloads: 4,
   speedLimitKBps: 0,
+  // The limiter is a toggle with a remembered value, like IDM's: switching it
+  // off keeps the KB/s figure so switching back on needs no retyping.
+  speedLimiterEnabled: false,
   downloadLimits: false,
+  // Scheduler (main-process; see core/scheduler.js for the shape).
+  schedule: {
+    enabled: false,
+    queueId: 'main',
+    startTime: null,
+    stopTime: null,
+    days: [0, 1, 2, 3, 4, 5, 6],
+    onComplete: 'none',
+    quota: { enabled: false, mb: 200, hours: 5 },
+  },
+  // Site Logins: [{ host: 'nas.local' | '*.example.com', username, password }].
+  siteLogins: [],
   // Escape hatch for self-signed certificates (a home NAS, a corporate MITM
   // proxy). Off by default: certificates are verified, because these requests
   // replay the session cookies the browser extension captured.

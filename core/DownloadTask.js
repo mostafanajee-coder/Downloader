@@ -9,6 +9,7 @@ const { probe } = require('./probe');
 const { planSegments } = require('./segments');
 const { RateLimiter } = require('./rateLimiter');
 const { resolveWorkspace, finalizeWorkspace } = require('./workspace');
+const { HttpStatusError, describeStatus, NON_RETRYABLE_STATUS } = require('./httpErrors');
 const speedometer = require('speedometer');
 
 function sleep(ms) {
@@ -553,6 +554,15 @@ class DownloadTask extends EventEmitter {
         attempt++;
         this.emit('segment-error', { index: seg.index, attempt, error: err.message });
 
+        if (err && err.retryable === false) {
+          if (!this.failed) {
+            this.failed = true;
+            this.error = err;
+            this.emit('error', this.error);
+          }
+          return;
+        }
+
         // Without range support a partial attempt cannot be continued: the
         // retry replays the body from byte zero, so keeping the old offset
         // splices the START of a fresh response onto the MIDDLE of the file.
@@ -601,7 +611,7 @@ class DownloadTask extends EventEmitter {
           const expectedStatus = this.acceptRanges ? [200, 206] : [200];
           if (!expectedStatus.includes(res.statusCode)) {
             res.resume();
-            reject(new Error(`Unexpected status ${res.statusCode}`));
+            reject(new HttpStatusError(res.statusCode, this.finalUrl || this.url));
             return;
           }
 
@@ -785,4 +795,4 @@ class DownloadTask extends EventEmitter {
   }
 }
 
-module.exports = { DownloadTask };
+module.exports = { DownloadTask, HttpStatusError, describeStatus, NON_RETRYABLE_STATUS };

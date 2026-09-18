@@ -43,4 +43,18 @@ contextBridge.exposeInMainWorld('api', {
   onGrabberAssetFound: (cb) => ipcRenderer.on('grabber:asset-found', (_e, a) => cb(a)),
   onGrabberPageError: (cb) => ipcRenderer.on('grabber:page-error', (_e, err) => cb(err)),
   onGrabberDone: (cb) => ipcRenderer.on('grabber:done', (_e, result) => cb(result)),
+  // Scheduler / completion actions
+  getSchedule: () => ipcRenderer.invoke('schedule:get'),
+  setSchedule: (schedule) => ipcRenderer.invoke('schedule:set', schedule),
+  cancelScheduledAction: () => ipcRenderer.invoke('schedule:cancelAction'),
+  onScheduleEvent: (cb) => ipcRenderer.on('schedule:event', (_e, ev) => cb(ev)),
+  // Speed limiter toggle
+  setLimiter: (state) => ipcRenderer.invoke('limiter:set', state),
+  onLimiterChanged: (cb) => ipcRenderer.on('limiter:changed', (_e, st) => cb(st)),
+  // Export / import
+  exportList: () => ipcRenderer.invoke('list:export'),
+  importList: () => ipcRenderer.invoke('list:import'),
+  // Clipboard monitor + tray shortcuts
+  onClipboardUrl: (cb) => ipcRenderer.on('clipboard:url', (_e, url) => cb(url)),
+  onOpenOptions: (cb) => ipcRenderer.on('ui:open-options', () => cb()),
 });

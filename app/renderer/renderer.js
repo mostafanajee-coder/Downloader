@@ -141,6 +141,9 @@ window.addEventListener('unhandledrejection', (e) => {
 });
 
 window.addEventListener('error', (e) => {
+  // Not an error: the browser deferred some ResizeObserver notifications to
+  // the next frame. Surfacing it as a toast would alarm users over nothing.
+  if (/ResizeObserver loop/i.test(e.message || '')) return;
   console.error('[Uncaught error]', e.error || e.message);
   showTransientError(`Unexpected error: ${e.message || 'something went wrong'}`);
 });
@@ -205,6 +208,95 @@ function injectIcons() {
 // operates strictly on this list rather than on the whole `items` map — a
 // Ctrl+A while the sidebar is filtered to "Finished" must not silently arm
 // the hidden Unfinished rows for the next Delete.
+// --- Column sorting ----------------------------------------------------------
+// Click a header to sort, click again to flip. Persisted like the column
+// widths. `null` means the natural order (insertion, or queue position inside
+// a queue) — which is also what "Move up/down" needs to be meaningful.
+const SORT_STORAGE_KEY = 'idm.sort.v1';
+let sortState = null; // { key, dir: 1 | -1 } or null
+
+const SORT_ACCESSORS = {
+  name: (i) => (i.filename || i.url || '').toLowerCase(),
+  q: (i) => (i.status === 'held' || i.status === 'queued' ? 1 : 0),
+  size: (i) => (i.size == null ? -1 : i.size),
+  status: (i) => i.status || '',
+  eta: (i) => (i.status === 'running' && i.progress && i.progress.eta != null ? i.progress.eta : Number.MAX_SAFE_INTEGER),
+  speed: (i) => (i.status === 'running' && i.progress ? i.progress.speedBytesPerSec || 0 : -1),
+  date: (i) => i.addedAt || 0,
+  description: (i) => (i.description || '').toLowerCase(),
+};
+
+function loadSortState() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SORT_STORAGE_KEY) || 'null');
+    if (raw && SORT_ACCESSORS[raw.key] && (raw.dir === 1 || raw.dir === -1)) sortState = raw;
+  } catch (e) {
+    sortState = null;
+  }
+}
+
+function saveSortState() {
+  try {
+    if (sortState) localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(sortState));
+    else localStorage.removeItem(SORT_STORAGE_KEY);
+  } catch (e) {
+    /* storage unavailable */
+  }
+}
+
+function applySort(list) {
+  if (!sortState) return list;
+  const get = SORT_ACCESSORS[sortState.key];
+  const dir = sortState.dir;
+  // Stable: ties keep their natural order so a sort by Status doesn't shuffle
+  // equal rows on every progress tick.
+  return list
+    .map((item, idx) => ({ item, idx }))
+    .sort((a, b) => {
+      const av = get(a.item);
+      const bv = get(b.item);
+      let c = 0;
+      if (typeof av === 'number' && typeof bv === 'number') c = av - bv;
+      else c = String(av).localeCompare(String(bv), undefined, { numeric: true, sensitivity: 'base' });
+      return c !== 0 ? c * dir : a.idx - b.idx;
+    })
+    .map((x) => x.item);
+}
+
+function updateSortIndicators() {
+  for (const th of headerCells()) {
+    const key = th.dataset.sortKey;
+    th.classList.toggle('sort-asc', Boolean(sortState && key === sortState.key && sortState.dir === 1));
+    th.classList.toggle('sort-desc', Boolean(sortState && key === sortState.key && sortState.dir === -1));
+  }
+}
+
+function initColumnSorting() {
+  const cols = columnDefs();
+  headerCells().forEach((th, i) => {
+    const key = cols[i] && cols[i].dataset.key;
+    if (!key || !SORT_ACCESSORS[key]) return;
+    th.dataset.sortKey = key;
+    th.classList.add('sortable');
+    th.title = 'Click to sort';
+    th.addEventListener('click', (e) => {
+      // The resize handle lives inside the header; a drag must not also sort.
+      if (e.target.closest('.col-resizer')) return;
+      if (sortState && sortState.key === key) {
+        // asc -> desc -> natural order, matching Explorer's three-state cycle.
+        sortState = sortState.dir === 1 ? { key, dir: -1 } : null;
+      } else {
+        sortState = { key, dir: 1 };
+      }
+      saveSortState();
+      updateSortIndicators();
+      render();
+    });
+  });
+  loadSortState();
+  updateSortIndicators();
+}
+
 function visibleItems() {
   const list = Array.from(items.values()).filter((item) => {
     if (currentCategory === 'all') return true;
@@ -219,7 +311,7 @@ function visibleItems() {
   if (currentCategory === 'queue') {
     list.sort((a, b) => (a.position || 0) - (b.position || 0) || a.addedAt - b.addedAt);
   }
-  return list;
+  return applySort(list);
 }
 
 // 2. Render Table Rows
@@ -735,6 +827,10 @@ async function openOptions() {
       setVal('cfg-speed-limit', String(cfg.speedLimitKBps || 0));
       if (cfg.maxConcurrentDownloads) setVal('cfg-max-simultaneous', String(cfg.maxConcurrentDownloads));
 
+      // Site logins
+      siteLoginsDraft = Array.isArray(cfg.siteLogins) ? cfg.siteLogins.map((l) => ({ ...l })) : [];
+      renderSiteLogins();
+
       // Proxy
       const proxy = cfg.proxy || {};
       const mode = proxy.mode || 'direct';
@@ -772,6 +868,46 @@ async function openOptions() {
   selectTab('general');
   settingsOverlay.classList.remove('hidden');
 }
+
+// --- Site logins (Options -> Connection) --------------------------------------
+// Edited as a draft and written on OK, like every other Options field.
+let siteLoginsDraft = [];
+
+function renderSiteLogins() {
+  const body = document.getElementById('logins-tbody');
+  if (!body) return;
+  body.innerHTML = '';
+  siteLoginsDraft.forEach((login, idx) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td class="l-host"></td><td class="l-user"></td><td class="l-pass"></td><td class="l-actions"></td>';
+    tr.querySelector('.l-host').textContent = login.host;
+    tr.querySelector('.l-user').textContent = login.username;
+    tr.querySelector('.l-pass').textContent = login.password ? '\u2022'.repeat(Math.min(8, login.password.length)) : '';
+    const del = document.createElement('button');
+    del.className = 'idm-btn';
+    del.textContent = 'Remove';
+    del.addEventListener('click', () => {
+      siteLoginsDraft.splice(idx, 1);
+      renderSiteLogins();
+    });
+    tr.querySelector('.l-actions').appendChild(del);
+    body.appendChild(tr);
+  });
+}
+
+document.getElementById('login-add-btn')?.addEventListener('click', () => {
+  const host = getVal('login-host').trim().toLowerCase();
+  const username = getVal('login-user').trim();
+  const password = getVal('login-pass');
+  if (!host || !username) return;
+  // One entry per host: re-adding replaces rather than duplicating.
+  siteLoginsDraft = siteLoginsDraft.filter((l) => l.host !== host);
+  siteLoginsDraft.push({ host, username, password });
+  setVal('login-host', '');
+  setVal('login-user', '');
+  setVal('login-pass', '');
+  renderSiteLogins();
+});
 
 // Greys out whichever proxy section the selected mode doesn't use, so it's
 // obvious which fields are actually in play.
@@ -837,6 +973,7 @@ async function saveOptions() {
       maxConcurrentDownloads: parseInt(getVal('cfg-max-simultaneous'), 10) || 4,
       speedLimitKBps: Math.max(0, parseInt(getVal('cfg-speed-limit'), 10) || 0),
       proxy: readProxyForm(cfg.proxy || {}),
+      siteLogins: siteLoginsDraft.map((l) => ({ host: l.host, username: l.username, password: l.password || '' })),
       tempDir: getVal('cfg-temp-dir').trim(),
       destDirs,
       fileTypes: getVal('cfg-file-types').trim(),
@@ -961,6 +1098,23 @@ document.getElementById('ctx-properties')?.addEventListener('click', () => {
 // Tasks Menu
 document.getElementById('dd-add-clipboard')?.addEventListener('click', pasteUrlIntoAddModal);
 
+document.getElementById('dd-export')?.addEventListener('click', async () => {
+  if (!window.api.exportList) return;
+  const r = await window.api.exportList();
+  if (r && r.saved) showTransientError(`Exported ${r.count} download(s) to ${r.path}`);
+});
+document.getElementById('dd-import')?.addEventListener('click', async () => {
+  if (!window.api.importList) return;
+  try {
+    const r = await window.api.importList();
+    if (r && r.imported) {
+      showTransientError(`Imported ${r.added} download(s) on hold${r.skipped ? `, skipped ${r.skipped}` : ''}. Start the queue when ready.`);
+    }
+  } catch (e) {
+    showTransientError(`Import failed: ${e.message}`);
+  }
+});
+
 document.getElementById('dd-exit')?.addEventListener('click', () => {
   window.close();
 });
@@ -1037,11 +1191,74 @@ document.getElementById('dd-resume-all')?.addEventListener('click', () => {
   }
 });
 
-document.getElementById('dd-speed-limiter')?.addEventListener('click', () => {
-  const limit = prompt('Enter max speed in KB/s (0 = unlimited):', '0');
-  if (limit !== null && window.api.setConfig) {
-    window.api.setConfig({ speedLimitKBps: parseInt(limit) || 0 });
+// --- Speed Limiter ------------------------------------------------------------
+// IDM's limiter is a switch with a remembered value, not a number you have to
+// re-enter; the status bar shows whether it's in force.
+let limiterState = { enabled: false, kbps: 0 };
+
+function renderLimiterIndicator() {
+  const el = document.getElementById('status-limiter');
+  if (!el) return;
+  const on = limiterState.enabled && limiterState.kbps > 0;
+  el.textContent = on ? `Limit: ${limiterState.kbps} KB/s` : 'Limit: off';
+  el.classList.toggle('limiter-on', on);
+  el.classList.toggle('limiter-off', !on);
+}
+
+async function initLimiterIndicator() {
+  try {
+    const cfg = window.api.getConfig ? await window.api.getConfig() : {};
+    limiterState = {
+      enabled: Boolean(cfg.speedLimiterEnabled),
+      kbps: Number(cfg.speedLimitKBps) || 0,
+    };
+  } catch (e) {
+    /* keep defaults */
   }
+  renderLimiterIndicator();
+  if (window.api.onLimiterChanged) {
+    window.api.onLimiterChanged((st) => {
+      limiterState = { enabled: Boolean(st.enabled), kbps: Number(st.kbps) || 0 };
+      renderLimiterIndicator();
+    });
+  }
+}
+
+function openLimiterModal() {
+  const enabled = document.getElementById('limiter-enabled');
+  const kbps = document.getElementById('limiter-kbps');
+  if (enabled) enabled.checked = limiterState.enabled;
+  if (kbps) kbps.value = String(limiterState.kbps || 500);
+  document.getElementById('limiter-modal')?.classList.remove('hidden');
+  kbps?.focus();
+}
+function closeLimiterModal() {
+  document.getElementById('limiter-modal')?.classList.add('hidden');
+}
+
+document.getElementById('dd-speed-limiter')?.addEventListener('click', openLimiterModal);
+document.getElementById('limiter-close')?.addEventListener('click', closeLimiterModal);
+document.getElementById('limiter-cancel-btn')?.addEventListener('click', closeLimiterModal);
+document.getElementById('limiter-apply-btn')?.addEventListener('click', async () => {
+  const enabled = document.getElementById('limiter-enabled')?.checked === true;
+  const kbps = Math.max(0, parseInt(document.getElementById('limiter-kbps')?.value, 10) || 0);
+  closeLimiterModal();
+  if (window.api.setLimiter) {
+    const st = await window.api.setLimiter({ enabled, kbps });
+    if (st) limiterState = { enabled: Boolean(st.enabled), kbps: Number(st.kbps) || 0 };
+    renderLimiterIndicator();
+  }
+});
+// Clicking the status-bar indicator toggles the switch without opening the dialog.
+document.getElementById('status-limiter')?.addEventListener('click', async () => {
+  if (!window.api.setLimiter) return;
+  if (!limiterState.kbps) {
+    openLimiterModal();
+    return;
+  }
+  const st = await window.api.setLimiter({ enabled: !limiterState.enabled });
+  if (st) limiterState = { enabled: Boolean(st.enabled), kbps: Number(st.kbps) || 0 };
+  renderLimiterIndicator();
 });
 
 // View Menu
@@ -1100,45 +1317,121 @@ function updateQueueUI(running) {
   }
 }
 
-// --- Scheduler (IDM-style queue start/stop timers) ---
-let scheduleStart = null; // 'HH:MM' or null
-let scheduleStop = null;
-let firedStart = false;
-let firedStop = false;
-
+// --- Scheduler ---------------------------------------------------------------
+// The timer itself lives in the main process (core/scheduler.js): a renderer
+// interval is throttled to ~1/min once the window is hidden, and this app
+// spends most of its life minimised to the tray. The renderer only edits the
+// schedule and shows the completion-action countdown.
 function openScheduler() {
-  const s = prompt('Start queue daily at (HH:MM, 24h). Leave blank to clear:', scheduleStart || '');
-  if (s !== null) {
-    const v = s.trim();
-    scheduleStart = /^\d{1,2}:\d{2}$/.test(v) ? v.padStart(5, '0') : null;
+  const modal = document.getElementById('scheduler-modal');
+  if (!modal || !window.api.getSchedule) return;
+
+  const queueSel = document.getElementById('sched-queue');
+  if (queueSel) {
+    queueSel.innerHTML = '';
+    for (const q of knownQueues) {
+      const opt = document.createElement('option');
+      opt.value = q.id;
+      opt.textContent = q.name;
+      queueSel.appendChild(opt);
+    }
   }
-  const e = prompt('Stop queue daily at (HH:MM, 24h). Leave blank to clear:', scheduleStop || '');
-  if (e !== null) {
-    const v = e.trim();
-    scheduleStop = /^\d{1,2}:\d{2}$/.test(v) ? v.padStart(5, '0') : null;
-  }
-  const parts = [];
-  if (scheduleStart) parts.push(`start at ${scheduleStart}`);
-  if (scheduleStop) parts.push(`stop at ${scheduleStop}`);
-  alert(parts.length ? `Scheduler set: ${parts.join(', ')} (while the app is running).` : 'Scheduler cleared.');
+
+  window.api.getSchedule().then((sch) => {
+    const st = sch || {};
+    const set = (id, v) => {
+      const el = document.getElementById(id);
+      if (el) el.value = v == null ? '' : String(v);
+    };
+    setChecked('sched-enabled', st.enabled);
+    if (queueSel && st.queueId) queueSel.value = st.queueId;
+    set('sched-start', st.startTime || '');
+    set('sched-stop', st.stopTime || '');
+    const days = Array.isArray(st.days) ? st.days : [0, 1, 2, 3, 4, 5, 6];
+    document.querySelectorAll('#sched-days input[type=checkbox]').forEach((cb) => {
+      cb.checked = days.includes(Number(cb.dataset.day));
+    });
+    set('sched-oncomplete', st.onComplete || 'none');
+    const quota = st.quota || {};
+    setChecked('sched-quota-enabled', quota.enabled);
+    set('sched-quota-mb', quota.mb || 200);
+    set('sched-quota-hours', quota.hours || 5);
+    modal.classList.remove('hidden');
+  });
 }
+
+function closeScheduler() {
+  document.getElementById('scheduler-modal')?.classList.add('hidden');
+}
+
+function readSchedulerForm() {
+  const days = Array.from(document.querySelectorAll('#sched-days input[type=checkbox]'))
+    .filter((cb) => cb.checked)
+    .map((cb) => Number(cb.dataset.day));
+  return {
+    enabled: getChecked('sched-enabled'),
+    queueId: document.getElementById('sched-queue')?.value || 'main',
+    startTime: getVal('sched-start').trim() || null,
+    stopTime: getVal('sched-stop').trim() || null,
+    days: days.length ? days : [0, 1, 2, 3, 4, 5, 6],
+    onComplete: document.getElementById('sched-oncomplete')?.value || 'none',
+    quota: {
+      enabled: getChecked('sched-quota-enabled'),
+      mb: Math.max(1, parseInt(getVal('sched-quota-mb'), 10) || 200),
+      hours: Math.max(1, parseInt(getVal('sched-quota-hours'), 10) || 5),
+    },
+  };
+}
+
 document.getElementById('scheduler-btn')?.addEventListener('click', openScheduler);
 document.getElementById('dd-scheduler')?.addEventListener('click', openScheduler);
+document.getElementById('scheduler-close')?.addEventListener('click', closeScheduler);
+document.getElementById('scheduler-cancel-btn')?.addEventListener('click', closeScheduler);
+document.getElementById('scheduler-apply-btn')?.addEventListener('click', async () => {
+  const schedule = readSchedulerForm();
+  closeScheduler();
+  if (window.api.setSchedule) await window.api.setSchedule(schedule);
+});
 
-setInterval(() => {
-  const now = new Date();
-  const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-  if (scheduleStart && hhmm === scheduleStart) {
-    if (!firedStart) { firedStart = true; startQueue(); }
-  } else {
-    firedStart = false;
-  }
-  if (scheduleStop && hhmm === scheduleStop) {
-    if (!firedStop) { firedStop = true; stopQueue(); }
-  } else {
-    firedStop = false;
-  }
-}, 1000);
+// Completion-action countdown: the main process gives 30 seconds before it
+// shuts down / hibernates / exits, and this is the user's chance to stop it.
+let powerCountdownTimer = null;
+function showPowerCountdown(action, inMs) {
+  const modal = document.getElementById('poweraction-modal');
+  const text = document.getElementById('poweraction-text');
+  const fill = document.getElementById('poweraction-fill');
+  if (!modal) return;
+  const verbs = { exit: 'exit the application', shutdown: 'turn off the computer', hibernate: 'hibernate', sleep: 'go to sleep' };
+  const started = Date.now();
+  const tick = () => {
+    const left = Math.max(0, inMs - (Date.now() - started));
+    if (text) text.textContent = `All scheduled downloads have finished. The app will ${verbs[action] || action} in ${Math.ceil(left / 1000)} seconds.`;
+    if (fill) fill.style.width = `${(left / inMs) * 100}%`;
+    if (left <= 0) hidePowerCountdown();
+  };
+  tick();
+  clearInterval(powerCountdownTimer);
+  powerCountdownTimer = setInterval(tick, 250);
+  modal.classList.remove('hidden');
+}
+function hidePowerCountdown() {
+  clearInterval(powerCountdownTimer);
+  powerCountdownTimer = null;
+  document.getElementById('poweraction-modal')?.classList.add('hidden');
+}
+document.getElementById('poweraction-cancel-btn')?.addEventListener('click', async () => {
+  hidePowerCountdown();
+  if (window.api.cancelScheduledAction) await window.api.cancelScheduledAction();
+});
+
+if (window.api && window.api.onScheduleEvent) {
+  window.api.onScheduleEvent((ev) => {
+    if (!ev) return;
+    if (ev.type === 'completion-action') showPowerCountdown(ev.action, ev.inMs || 30000);
+    else if (ev.type === 'completion-action-cancelled') hidePowerCountdown();
+    else if (ev.type === 'quota-exceeded') showTransientError(`Download quota reached (${Math.round(ev.usedBytes / 1048576)} MB in ${ev.hours}h) - queues stopped.`);
+  });
+}
 
 // --- Site Grabber Wizard ----------------------------------------------------
 const grabberModal = document.getElementById('grabber-modal');
@@ -2316,7 +2609,11 @@ function initColumnResizing() {
       const w = tableWrap.clientWidth;
       if (w === lastWidth) return; // ignore height-only changes; nothing to redo
       lastWidth = w;
-      applyColumnLayout();
+      // Writing layout from inside an observer callback can trigger another
+      // observation in the same frame, which the browser reports as
+      // "ResizeObserver loop completed with undelivered notifications".
+      // Deferring the write to the next frame breaks that cycle.
+      requestAnimationFrame(applyColumnLayout);
     });
     ro.observe(tableWrap);
   } else {
@@ -2331,7 +2628,9 @@ function init() {
   _initialized = true;
   injectIcons();
   initColumnResizing();
+  initColumnSorting();
   refreshQueues();
+  initLimiterIndicator();
 
   if (window.api && window.api.getConfig) {
     window.api.getConfig().then((c) => { appConfig = c || {}; }).catch(() => {});
@@ -2391,6 +2690,22 @@ function init() {
 
   if (window.api && window.api.onDuplicateDetected) {
     window.api.onDuplicateDetected(showDuplicateModal);
+  }
+
+  // Clipboard monitor (main process): a copied file URL is offered, never
+  // silently queued — the Add URL dialog opens prefilled so the user confirms.
+  if (window.api && window.api.onClipboardUrl) {
+    window.api.onClipboardUrl((url) => {
+      if (!url || !addUrlModal || !urlInput) return;
+      if (!addUrlModal.classList.contains('hidden') && urlInput.value.trim()) return; // don't clobber typing
+      urlInput.value = url;
+      addUrlModal.classList.remove('hidden');
+      urlInput.focus();
+      urlInput.select();
+    });
+  }
+  if (window.api && window.api.onOpenOptions) {
+    window.api.onOpenOptions(() => openOptions());
   }
 
   if (window.api && window.api.onQueuesChanged) {

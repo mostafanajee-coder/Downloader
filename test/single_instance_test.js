@@ -74,7 +74,7 @@ function loadMain({ hasLock, bridgeBinds = true }) {
                                            : { httpServer: null, wss: null, stop: () => Promise.resolve() });
       },
     },
-    [path.join(ROOT, 'core', 'config.js')]: { ConfigManager: function ConfigManager() { return { getAll: () => ({}), setAll() {} }; } },
+    [path.join(ROOT, 'core', 'config.js')]: { ConfigManager: function ConfigManager() { return { get: () => undefined, set() {}, getAll: () => ({}), setAll() {} }; } },
     [path.join(ROOT, 'core', 'siteGrabber.js')]: { SiteGrabber: function SiteGrabber() { return { on() {}, crawl: () => Promise.resolve([]), cancel() {} }; } },
   };
 
