@@ -376,6 +376,24 @@ body.col-resizing * {
   font-style: italic;
 }
 
+/* A failed download reads as failed at a glance; the reason is in the
+   Description column and the row tooltip. */
+.status-error {
+  color: #f87171;
+  font-weight: 600;
+}
+
+.idm-table tr.row-error .col-desc {
+  color: #fca5a5;
+}
+
+/* File-type icon in the File Name cell. */
+.row-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: #9aa4b2;
+}
+
 /* Q column: small dot marking items that belong to the queue (held / eligible-waiting) */
 .q-mark {
   display: inline-block;

@@ -150,6 +150,21 @@ async function testMaxAssetsCap(server) {
   check('maxAssets cap respected', results.length <= 2, `got ${results.length}`);
 }
 
+// One link with a broken %-escape must not end the crawl for every other link.
+async function testMalformedEscapeDoesNotAbort() {
+  const g = new SiteGrabber({ targetUrl: 'http://x.test/' });
+  const found = [];
+  g.on('asset-found', (a) => found.push(a.filename));
+  let threw = null;
+  try {
+    g.extractAssetsFromHtml('<a href="bad%E0%A4%A.pdf">x</a><a href="good.pdf">y</a><img src="pic.jpg">', 'http://x.test/');
+  } catch (e) {
+    threw = e;
+  }
+  check('a malformed %-escape in one link does not throw', !threw, threw && threw.message);
+  check('the other links on the page are still found', found.includes('good.pdf') && found.includes('pic.jpg'), found.join(', '));
+}
+
 async function testDoneEvent(server) {
   const port = server.address().port;
   const g = new SiteGrabber({ targetUrl: `http://127.0.0.1:${port}/index.html`, maxDepth: 0 });
@@ -171,6 +186,7 @@ async function testDoneEvent(server) {
     await testFilterCategory(server);
     await testMaxAssetsCap(server);
     await testDoneEvent(server);
+    await testMalformedEscapeDoesNotAbort();
     await testCancel(slowServer);
   } catch (e) {
     console.error('ERROR', e);

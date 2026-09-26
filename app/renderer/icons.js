@@ -27,6 +27,7 @@ const ICONS = {
   exe: '<rect x="4" y="4" width="16" height="16" rx="3" stroke="currentColor" fill="rgba(255,255,255,0.05)"/><path d="M8 8l4 4-4 4" stroke="url(#success-grad)"/><path d="M14 16h2" stroke="currentColor"/>',
   image: '<rect x="3" y="4" width="18" height="16" rx="2" stroke="currentColor" fill="rgba(255,255,255,0.05)"/><circle cx="8.5" cy="10" r="1.8" fill="url(#warning-grad)" stroke="none"/><path d="M4 17l5-5 4 4 3-3 4 4" stroke="url(#accent-grad)"/>',
   globe: '<circle cx="12" cy="12" r="9" stroke="currentColor" fill="rgba(255,255,255,0.05)"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18" stroke="currentColor"/>',
+  file: '<path d="M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" stroke="currentColor" fill="rgba(255,255,255,0.03)"/><path d="M14 3v5h5" stroke="currentColor"/><path d="M9 13h6M9 17h4" stroke="url(#accent-grad)"/>',
 };
 
 const DEFS = `

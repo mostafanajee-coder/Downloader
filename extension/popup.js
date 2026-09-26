@@ -2,6 +2,7 @@
 
 const statusEl = document.getElementById('status');
 const refreshBtn = document.getElementById('refresh');
+const captureSummaryEl = document.getElementById('capture-summary');
 
 async function refreshStatus() {
   statusEl.textContent = 'Checking connection…';
@@ -12,6 +13,12 @@ async function refreshStatus() {
   const connected = Boolean(res && res.bridgeConnected);
   statusEl.textContent = connected ? 'Connected to app ✓' : 'App not running — start it to connect';
   statusEl.className = connected ? 'ok' : 'bad';
+  // Which downloads will be taken automatically (the app's File Types list).
+  if (captureSummaryEl) {
+    const summary = connected && res && res.captureSummary;
+    captureSummaryEl.textContent = summary || '';
+    captureSummaryEl.style.display = summary ? '' : 'none';
+  }
 }
 
 refreshBtn.addEventListener('click', refreshStatus);

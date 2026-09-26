@@ -27,6 +27,16 @@ function classifyAsset(ext) {
   return null; // not a downloadable asset type we care about
 }
 
+// One link with a broken %-escape ("bad%E0%A4%A.pdf") used to throw out of
+// the extraction loop and end the whole crawl with nothing found.
+function safeDecode(s) {
+  try {
+    return decodeURIComponent(s);
+  } catch (e) {
+    return s;
+  }
+}
+
 function kindForUrl(urlStr) {
   const path = urlStr.split('?')[0].split('#')[0].toLowerCase();
   if (path.endsWith('.m3u8')) return 'hls';
@@ -132,7 +142,7 @@ class SiteGrabber extends EventEmitter {
       }
       if (this.foundAssets.has(absoluteUrl)) continue;
 
-      const filename = decodeURIComponent(absoluteUrl.split('/').pop().split('?')[0]) || 'asset.bin';
+      const filename = safeDecode(absoluteUrl.split('/').pop().split('?')[0].split('#')[0]) || 'asset.bin';
       const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
       const category = classifyAsset(ext);
       if (!category) continue; // not a recognized downloadable type at all

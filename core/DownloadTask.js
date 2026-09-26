@@ -4,30 +4,68 @@ const EventEmitter = require('events');
 const fs = require('fs');
 const path = require('path');
 
-const { request, responseEncoding, createDecoder } = require('./httpUtils');
+const { request, responseEncoding, createDecoder, createStallGuard } = require('./httpUtils');
 const { probe } = require('./probe');
 const { planSegments } = require('./segments');
 const { RateLimiter } = require('./rateLimiter');
 const { resolveWorkspace, finalizeWorkspace } = require('./workspace');
 const { HttpStatusError, describeStatus, NON_RETRYABLE_STATUS } = require('./httpErrors');
+const { sanitizeFilename } = require('./filename');
+const { scopeHeaders } = require('./headerScope');
 const speedometer = require('speedometer');
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// A real extension, as opposed to whatever follows the last dot of a title:
+// "Episode 2.0" or "Ep. 5" must not stop the server's ".mp4" being appended.
+function extensionOf(name) {
+  const ext = path.extname(name || '');
+  return /^\.[a-z0-9]{1,10}$/i.test(ext) && !/^\.\d+$/.test(ext) ? ext : '';
+}
+
 function resolveFilename(suggested, probedFilename) {
   if (!suggested) return probedFilename || 'download.bin';
-  const hasExt = Boolean(path.extname(suggested));
-  if (hasExt) return suggested;
-  const ext = path.extname(probedFilename || '');
+  if (extensionOf(suggested)) return suggested;
+  const ext = extensionOf(probedFilename);
   return ext ? `${suggested}${ext}` : suggested;
+}
+
+/** `bytes 100-199/1000` -> { start: 100, end: 199, total: 1000 } (total null for `*`). */
+function parseContentRange(value) {
+  const m = /^\s*bytes\s+(\d+)-(\d+)\/(\d+|\*)\s*$/i.exec(String(value || ''));
+  if (!m) return null;
+  return { start: Number(m[1]), end: Number(m[2]), total: m[3] === '*' ? null : Number(m[3]) };
+}
+
+// Internal signals that stop every worker and restart the transfer in a
+// different mode, rather than failing it. Never surfaced as the task's error.
+const RESTART_SINGLE_STREAM = 'single-stream'; // server ignores Range
+const RESTART_FRESH = 'changed'; // the file on the server is not the one we were resuming
+
+function restartError(reason, message) {
+  const err = new Error(message);
+  err.restart = reason;
+  return err;
 }
 
 const MIN_SPLIT_SIZE = 1024 * 1024; // 1 MB minimum segment size to allow dynamic splitting
 
 class DownloadTask extends EventEmitter {
-  constructor({ url, destPath, destDir, connections = 8, headers = {}, retries = 5, suggestedFilename = null, speedLimit = 0, rateLimiter = null, tempDir = null }) {
+  constructor({
+    url,
+    destPath,
+    destDir,
+    connections = 8,
+    headers = {},
+    retries = 5,
+    suggestedFilename = null,
+    speedLimit = 0,
+    rateLimiter = null,
+    tempDir = null,
+    reserveDestPath = null,
+  }) {
     super();
     if (!destPath && !destDir) {
       throw new Error('Either destPath or destDir must be provided');
@@ -44,6 +82,10 @@ class DownloadTask extends EventEmitter {
     // speedLimit lazily builds a private limiter so this task is capped on its
     // own (used by the CLI). 0 / no limiter => unlimited.
     this.rateLimiter = rateLimiter || (speedLimit > 0 ? new RateLimiter(speedLimit) : null);
+    // Lets the owner (the Manager) turn a candidate path into one no other
+    // download is using, so two "video.mp4"s from different sites can't share
+    // a file — see Manager._reserveDestPath.
+    this.reserveDestPath = typeof reserveDestPath === 'function' ? reserveDestPath : null;
 
     // Where the bytes actually land while the download runs. Resolved in
     // start(), once destPath is known — everything on disk (segments,
@@ -67,6 +109,13 @@ class DownloadTask extends EventEmitter {
     this.contentEncoding = null; // non-null only if the origin compressed anyway
     this.finalUrl = url;
     this.filename = null;
+    // Validators for the representation being downloaded. Sent back as
+    // If-Range when resuming, so a file that changed on the server restarts
+    // cleanly instead of being spliced onto the old one's first half.
+    this.etag = null;
+    this.lastModified = null;
+    this._resumedSession = false;
+    this._restartReason = null;
 
     this.downloadedTotal = 0;
     this.startTime = null;
@@ -84,7 +133,12 @@ class DownloadTask extends EventEmitter {
     if (!this.destPath) {
       fs.mkdirSync(this.destDir, { recursive: true });
       preProbedInfo = await probe(this.url, this.headers);
-      this.destPath = path.join(this.destDir, resolveFilename(this.suggestedFilename, preProbedInfo.filename));
+      // The server's idea of the name is hostile input: sanitising it is what
+      // keeps "..\..\Startup\x.bat" inside the download folder.
+      const name = sanitizeFilename(resolveFilename(this.suggestedFilename, preProbedInfo.filename), 'download.bin');
+      let candidate = path.join(this.destDir, name);
+      if (this.reserveDestPath) candidate = this.reserveDestPath(candidate) || candidate;
+      this.destPath = candidate;
     }
 
     // The destination folder is created up front even though nothing is written
@@ -97,6 +151,7 @@ class DownloadTask extends EventEmitter {
     this.workDir = workspace.workDir;
     this.usingTemp = workspace.usingTemp;
     this.metaPath = `${this.workPath}.ddl.json`;
+    this.filename = path.basename(this.destPath);
 
     // A sidecar that can't be read is treated as absent rather than fatal — a
     // half-written .ddl.json used to throw straight out of start() and wedge an
@@ -105,21 +160,7 @@ class DownloadTask extends EventEmitter {
     if (resumed) {
       this._reconcileWithDisk();
     } else {
-      const info = preProbedInfo || (await probe(this.url, this.headers));
-      this.size = info.size;
-      this.finalUrl = info.finalUrl || this.url;
-      this.acceptRanges = Boolean(info.acceptRanges && info.size != null);
-      this.contentEncoding = info.contentEncoding || null;
-      this.filename = resolveFilename(this.suggestedFilename, info.filename);
-
-      if (this.acceptRanges) {
-        this.segments = planSegments(this.size, this.connections);
-      } else {
-        this.segments = [
-          { index: 0, start: 0, end: this.size != null ? this.size - 1 : null, downloaded: 0, done: false },
-        ];
-      }
-      this._saveMeta();
+      await this._initFresh(preProbedInfo);
     }
 
     // Pre-allocate destination file if size is known and file doesn't exist or isn't pre-allocated yet
@@ -140,6 +181,28 @@ class DownloadTask extends EventEmitter {
 
     try {
       await this._runWorkers();
+      // One change of strategy per run: a server that ignores Range gets a
+      // single plain stream; a file that changed underneath a resume gets a
+      // fresh probe and a fresh start. A second request for a restart in the
+      // same run means something is badly wrong, and fails the download.
+      if (this._restartReason && !this.cancelled && !this.paused && !this.failed) {
+        const reason = this._restartReason;
+        this._restartReason = null;
+        if (reason === RESTART_FRESH) await this._initFresh(null);
+        else this._switchToSingleStream();
+        this._preallocateFile();
+        this.downloadedTotal = this.segments.reduce((sum, s) => sum + s.downloaded, 0);
+        this._saveMeta();
+        this.emit('restarted', { reason, size: this.size, segments: this.segments.length });
+        await this._runWorkers();
+        if (this._restartReason && !this.cancelled && !this.paused && !this.failed) {
+          this.failed = true;
+          this.error = new Error(
+            'The server keeps changing how it serves this file (byte ranges or content), so it cannot be downloaded reliably.'
+          );
+          this.emit('error', this.error);
+        }
+      }
     } finally {
       clearInterval(this._progressTimer);
       this._progressTimer = null;
@@ -204,6 +267,41 @@ class DownloadTask extends EventEmitter {
     this._cleanup();
     this.finished = true;
     this.emit('complete', { destPath: this.destPath, size: this.size });
+  }
+
+  /** Probe (unless already done) and lay out a brand-new transfer. */
+  async _initFresh(info) {
+    const probed = info || (await probe(this.url, this.headers));
+    this.size = probed.size;
+    this.finalUrl = probed.finalUrl || this.url;
+    this.acceptRanges = Boolean(probed.acceptRanges && probed.size != null);
+    this.contentEncoding = probed.contentEncoding || null;
+    this.etag = probed.etag || null;
+    this.lastModified = probed.lastModified || null;
+    this._resumedSession = false;
+
+    if (this.acceptRanges) {
+      this.segments = planSegments(this.size, this.connections);
+    } else {
+      this.segments = [
+        { index: 0, start: 0, end: this.size != null ? this.size - 1 : null, downloaded: 0, done: false },
+      ];
+    }
+    this._saveMeta();
+  }
+
+  /**
+   * The server advertised byte ranges but answered a ranged request with the
+   * whole file (200). Whatever other connections wrote is from genuine 206
+   * responses and so correct, but nothing more can be fetched by offset:
+   * start again as one plain stream from byte zero.
+   */
+  _switchToSingleStream() {
+    this.acceptRanges = false;
+    this._resumedSession = false;
+    this.segments = [
+      { index: 0, start: 0, end: this.size != null ? this.size - 1 : null, downloaded: 0, done: false },
+    ];
   }
 
   /**
@@ -307,12 +405,19 @@ class DownloadTask extends EventEmitter {
     }
     if (!meta || !Array.isArray(meta.segments) || meta.segments.length === 0) return false;
 
-    this.url = meta.url || this.url;
-    this.finalUrl = meta.finalUrl || this.url;
+    // The URL we were started with is authoritative. It differs from the
+    // sidecar's only after "Refresh download address", and letting the sidecar
+    // win there is exactly what made that feature keep hammering the expired
+    // link. A refreshed address also invalidates the old redirect target and
+    // the old validators (another mirror may tag the same bytes differently);
+    // the Content-Range total still guards against resuming a different file.
+    const refreshed = Boolean(meta.url) && meta.url !== this.url;
+    this.finalUrl = refreshed ? this.url : meta.finalUrl || this.url;
+    this.etag = refreshed ? null : meta.etag || null;
+    this.lastModified = refreshed ? null : meta.lastModified || null;
     this.size = meta.size == null ? null : meta.size;
     this.acceptRanges = Boolean(meta.acceptRanges);
     this.contentEncoding = meta.contentEncoding || null;
-    this.filename = meta.filename || this.filename;
     this.segments = meta.segments.map((s) => ({
       index: s.index,
       start: s.start,
@@ -325,6 +430,7 @@ class DownloadTask extends EventEmitter {
       // at all and a partial file sailed straight through to 'complete'.
       active: false,
     }));
+    this._resumedSession = true;
     return true;
   }
 
@@ -373,6 +479,7 @@ class DownloadTask extends EventEmitter {
   }
 
   _saveMeta() {
+    if (!this.metaPath) return;
     try {
       const meta = {
         url: this.url,
@@ -380,6 +487,8 @@ class DownloadTask extends EventEmitter {
         size: this.size,
         acceptRanges: this.acceptRanges,
         contentEncoding: this.contentEncoding || null,
+        etag: this.etag || null,
+        lastModified: this.lastModified || null,
         filename: this.filename,
         // Rebuilt field by field rather than serialising this.segments wholesale:
         // those carry a live `_writer` (a stream, unserialisable) and the
@@ -412,6 +521,7 @@ class DownloadTask extends EventEmitter {
       speedBytesPerSec: speed,
       eta, // seconds remaining (null when unknown)
       connections: this.connections,
+      resumable: this.acceptRanges,
       segments: this.segments.map((s) => ({
         index: s.index,
         start: s.start,
@@ -421,6 +531,11 @@ class DownloadTask extends EventEmitter {
         active: Boolean(s.active),
       })),
     };
+  }
+
+  /** True while the worker pool should keep pulling work. */
+  _running() {
+    return !this.cancelled && !this.paused && !this.failed && !this._restartReason;
   }
 
   /**
@@ -436,7 +551,7 @@ class DownloadTask extends EventEmitter {
   }
 
   async _workerLoop(workerId) {
-    while (!this.cancelled && !this.paused && !this.failed) {
+    while (this._running()) {
       let targetSeg = this._getNextUnfinishedSegment();
 
       // Dynamic Chunking: If no unassigned segment, attempt to split the largest active segment
@@ -461,13 +576,7 @@ class DownloadTask extends EventEmitter {
       // returns reporting success, has not advanced a single byte, and still
       // is not complete, handing it back to the pool can only repeat that
       // forever. Stop and surface it rather than hammering the server.
-      if (
-        !this.cancelled &&
-        !this.paused &&
-        !this.failed &&
-        targetSeg.downloaded === downloadedBefore &&
-        !this._isSegmentComplete(targetSeg)
-      ) {
+      if (this._running() && targetSeg.downloaded === downloadedBefore && !this._isSegmentComplete(targetSeg)) {
         this.failed = true;
         this.error = new Error(
           `Segment ${targetSeg.index} made no progress and never signalled completion — aborting to avoid an endless retry loop.`
@@ -536,6 +645,7 @@ class DownloadTask extends EventEmitter {
       start: splitPoint,
       end: oldEnd,
       downloaded: 0,
+      done: false,
       active: false,
     };
 
@@ -546,11 +656,27 @@ class DownloadTask extends EventEmitter {
 
   async _downloadSegmentWithRetry(seg) {
     let attempt = 0;
-    while (!this.cancelled && !this.paused && !this.failed) {
+    while (this._running()) {
+      const before = seg.downloaded;
       try {
         await this._streamSegment(seg);
         return;
       } catch (err) {
+        if (err && err.restart) {
+          // Not a failure of this connection: the whole transfer has to change
+          // strategy. The first worker to notice decides; the rest wind down.
+          if (!this._restartReason) this._restartReason = err.restart;
+          this.emit('segment-error', { index: seg.index, attempt: attempt + 1, error: err.message });
+          return;
+        }
+
+        // A connection that delivered data before dropping was a transient
+        // hiccup, not a failing server: it earns a fresh retry budget. Without
+        // this a long download on a flaky line exhausted its five retries over
+        // the course of an hour and failed despite constant forward progress.
+        // (Resumable transfers only — anything else restarts from zero, so its
+        // "progress" is not progress.)
+        if (this.acceptRanges && seg.downloaded > before) attempt = 0;
         attempt++;
         this.emit('segment-error', { index: seg.index, attempt, error: err.message });
 
@@ -592,6 +718,25 @@ class DownloadTask extends EventEmitter {
     }
   }
 
+  /**
+   * A strong validator for If-Range, or null. Weak ETags are not allowed there.
+   *
+   * Only offered when the link is served directly rather than redirected to
+   * another host: every connection re-follows the redirect, and a mirror
+   * network can land each one on a different server whose ETag / mtime for
+   * the SAME file differs — which would restart a perfectly good resume from
+   * zero. Redirected downloads still get the Content-Range total-size check.
+   */
+  _ifRangeValidator() {
+    try {
+      if (this.finalUrl && new URL(this.finalUrl).host !== new URL(this.url).host) return null;
+    } catch (e) {
+      return null;
+    }
+    if (this.etag && !/^W\//.test(this.etag)) return this.etag;
+    return this.lastModified || null;
+  }
+
   _streamSegment(seg) {
     return new Promise((resolve, reject) => {
       const currentStart = seg.start + seg.downloaded;
@@ -600,18 +745,67 @@ class DownloadTask extends EventEmitter {
         return;
       }
 
-      const headers = { ...this.headers };
+      // Every connection starts from the URL the user gave and follows its
+      // redirects afresh, rather than going straight to where the probe was
+      // sent: redirect targets are routinely short-lived signed links (GitHub
+      // release assets, S3, most file hosts), and a connection opened ten
+      // minutes in — a retry, a dynamic split — would find it expired. got
+      // strips Cookie/Authorization itself when a redirect changes host.
+      const targetUrl = this.url;
+      const headers = { ...scopeHeaders(this.url, targetUrl, this.headers) };
+      let ifRange = null;
       if (this.acceptRanges) {
         const end = seg.end != null ? seg.end : '';
         headers.Range = `bytes=${currentStart}-${end}`;
+        ifRange = this._resumedSession ? this._ifRangeValidator() : null;
+        if (ifRange) headers['If-Range'] = ifRange;
       }
 
-      request(this.finalUrl || this.url, { method: 'GET', headers, raw: true })
+      request(targetUrl, { method: 'GET', headers, raw: true })
         .then(({ res }) => {
+          if (this.acceptRanges) {
+            // 200 to a ranged request is the whole file from byte zero. With
+            // If-Range it means the file changed since we started; without, the
+            // server simply ignores ranges. Either way, writing it at this
+            // segment's offset would put the file's first bytes in the middle.
+            if (res.statusCode === 200 && (currentStart > 0 || ifRange)) {
+              res.destroy();
+              reject(
+                ifRange
+                  ? restartError(RESTART_FRESH, 'The file on the server changed since the download started; restarting it.')
+                  : restartError(RESTART_SINGLE_STREAM, 'The server ignored the byte-range request; continuing on a single connection.')
+              );
+              return;
+            }
+            if (res.statusCode === 416) {
+              res.resume();
+              reject(restartError(RESTART_FRESH, 'The server no longer has the byte range being resumed (HTTP 416); restarting.'));
+              return;
+            }
+            if (res.statusCode === 206) {
+              const cr = parseContentRange(res.headers['content-range']);
+              if (cr && cr.total != null && this.size != null && cr.total !== this.size) {
+                res.destroy();
+                reject(
+                  restartError(
+                    RESTART_FRESH,
+                    `The file on the server is now ${cr.total} bytes, not ${this.size}; restarting the download.`
+                  )
+                );
+                return;
+              }
+              if (cr && cr.start !== currentStart) {
+                res.destroy();
+                reject(new Error(`The server sent bytes from ${cr.start} when ${currentStart} was requested.`));
+                return;
+              }
+            }
+          }
+
           const expectedStatus = this.acceptRanges ? [200, 206] : [200];
           if (!expectedStatus.includes(res.statusCode)) {
             res.resume();
-            reject(new HttpStatusError(res.statusCode, this.finalUrl || this.url));
+            reject(new HttpStatusError(res.statusCode, targetUrl));
             return;
           }
 
@@ -680,12 +874,19 @@ class DownloadTask extends EventEmitter {
           const fail = (err) => {
             if (settled) return;
             settled = true;
+            stall.clear();
             closeSource();
             rollbackUnflushed();
             seg._writer = null;
             ws.destroy();
             reject(err);
           };
+
+          // A connection that stops delivering without closing would otherwise
+          // hold this segment forever — nothing in the HTTP layer times out a
+          // body mid-flight any more (see httpUtils). The guard only runs while
+          // we are actually waiting on the network.
+          const stall = createStallGuard(fail);
 
           // Flush buffered writes, then resolve. ws.end() guarantees every
           // prior ws.write() has hit the fd before the callback fires — which
@@ -694,6 +895,7 @@ class DownloadTask extends EventEmitter {
           const succeed = () => {
             if (settled) return;
             settled = true;
+            stall.clear();
             closeSource();
             ws.end(() => {
               seg._writer = null;
@@ -712,18 +914,22 @@ class DownloadTask extends EventEmitter {
           src.on('data', (chunk) => {
             if (settled) return;
             src.pause();
+            stall.disarm();
             this._consumeChunk(chunk, seg, ws)
               .then((reachedEnd) => {
                 if (settled) return;
-                if (reachedEnd || this.paused || this.cancelled || this.failed) succeed();
-                else src.resume();
+                if (reachedEnd || !this._running()) succeed();
+                else {
+                  stall.arm();
+                  src.resume();
+                }
               })
               .catch(fail);
           });
 
           // Server closed the response normally (all requested bytes received).
           src.on('end', () => {
-            const stillRunning = !this.paused && !this.cancelled && !this.failed;
+            const stillRunning = this._running();
             if (seg.end == null) {
               // An open-ended segment has no byte target, so the body ending IS
               // its completion signal. Recording it is what stops the worker
@@ -740,6 +946,8 @@ class DownloadTask extends EventEmitter {
             }
             succeed();
           });
+
+          stall.arm();
         })
         .catch(reject);
     });
@@ -795,4 +1003,4 @@ class DownloadTask extends EventEmitter {
   }
 }
 
-module.exports = { DownloadTask, HttpStatusError, describeStatus, NON_RETRYABLE_STATUS };
+module.exports = { DownloadTask, HttpStatusError, describeStatus, NON_RETRYABLE_STATUS, resolveFilename, parseContentRange };

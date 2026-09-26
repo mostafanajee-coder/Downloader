@@ -19,11 +19,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function loadMain({ hasLock, bridgeBinds = true }) {
   const log = { quit: 0, exit: 0, appEvents: {}, whenReadyRegistered: 0, windowsCreated: 0, traysCreated: 0,
-                bridgeCalls: 0, managersCreated: 0, notifications: [], shown: 0, focused: 0, restored: 0, added: [] };
+                bridgeCalls: 0, managersCreated: 0, notifications: [], shown: 0, focused: 0, restored: 0, added: [],
+                wcEvents: {}, openHandler: null, openedExternally: [], windowOptions: null };
 
   const fakeWindow = {
     _destroyed: false, _minimized: true, _visible: false,
-    webContents: { send() {} },
+    webContents: {
+      send() {},
+      on(evt, fn) { log.wcEvents[evt] = fn; },
+      setWindowOpenHandler(fn) { log.openHandler = fn; },
+    },
     isDestroyed: () => fakeWindow._destroyed,
     isMinimized: () => fakeWindow._minimized,
     isVisible: () => fakeWindow._visible,
@@ -47,7 +52,7 @@ function loadMain({ hasLock, bridgeBinds = true }) {
   const electron = {
     app,
     BrowserWindow: Object.assign(
-      function BrowserWindow() { log.windowsCreated++; return fakeWindow; },
+      function BrowserWindow(opts) { log.windowsCreated++; log.windowOptions = opts; return fakeWindow; },
       { getAllWindows: () => [fakeWindow] }
     ),
     ipcMain: { handle() {} },
@@ -55,7 +60,7 @@ function loadMain({ hasLock, bridgeBinds = true }) {
     Menu: { setApplicationMenu() {}, buildFromTemplate: () => ({}) },
     Tray: function Tray() { log.traysCreated++; return { setToolTip() {}, setContextMenu() {}, on() {} }; },
     nativeImage: { createFromPath: () => ({ isEmpty: () => true }), createEmpty: () => ({}) },
-    shell: { openPath() {}, showItemInFolder() {}, trashItem: () => Promise.resolve() },
+    shell: { openPath() {}, showItemInFolder() {}, trashItem: () => Promise.resolve(), openExternal: (u) => log.openedExternally.push(u) },
   };
 
   const stubs = {
@@ -118,6 +123,19 @@ function loadMain({ hasLock, bridgeBinds = true }) {
       { bridge: log.bridgeCalls, mgr: log.managersCreated, win: log.windowsCreated, tray: log.traysCreated });
     check('[primary] a successfully bound bridge raises no warning notification',
       !log.notifications.some((n) => /9333|browser integration/i.test(n.title + n.message)), log.notifications);
+
+    // The preload exposes file/settings IPC; the window may only ever show our page.
+    const prefs = (log.windowOptions && log.windowOptions.webPreferences) || {};
+    check('[primary] renderer is sandboxed with context isolation',
+      prefs.sandbox === true && prefs.contextIsolation === true && prefs.nodeIntegration === false, prefs);
+    let prevented = false;
+    if (log.wcEvents['will-navigate']) log.wcEvents['will-navigate']({ preventDefault() { prevented = true; } }, 'https://evil.test/');
+    check('[primary] navigating the window away is blocked', prevented);
+    const httpResult = log.openHandler && log.openHandler({ url: 'https://docs.example/help' });
+    const fileResult = log.openHandler && log.openHandler({ url: 'file:///C:/Windows/System32/calc.exe' });
+    check('[primary] window.open never creates an app window', httpResult && httpResult.action === 'deny' && fileResult && fileResult.action === 'deny');
+    check('[primary] only http(s) links are handed to the browser',
+      log.openedExternally.length === 1 && log.openedExternally[0] === 'https://docs.example/help', log.openedExternally);
 
     // Simulate the ghost launch the user hit: window minimized AND hidden to tray.
     fakeWindow._minimized = true;

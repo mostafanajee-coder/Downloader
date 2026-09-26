@@ -5,9 +5,10 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const { resolvePlaylist } = require('./hls');
+const { resolvePlaylist, segmentIv } = require('./hls');
 const { streamToFile } = require('./streamFile');
 const { resolveWorkspace, finalizeWorkspace } = require('./workspace');
+const { scopeHeaders } = require('./headerScope');
 const speedometer = require('speedometer');
 
 function sleep(ms) {
@@ -18,6 +19,14 @@ async function listVariants(playlistUrl, headers = {}) {
   const result = await resolvePlaylist(playlistUrl, headers);
   if (result.type === 'master') return result.variants;
   return [{ bandwidth: null, resolution: null, url: playlistUrl }];
+}
+
+function fileSize(p) {
+  try {
+    return fs.statSync(p).size;
+  } catch (e) {
+    return 0;
+  }
 }
 
 /**
@@ -55,14 +64,22 @@ class HlsDownloadTask extends EventEmitter {
 
     this.paused = false;
     this.cancelled = false;
+    this.failed = false;
     this.segDir = null;
     this.segments = [];
     this.mapUri = null;
+    this.maps = new Map(); // "uri|start-end" -> local file name
     this.keysMap = new Map(); // remoteUri -> localFileName
     this.completed = 0;
-    this.downloadedBytes = 0;
+    this.downloadedBytes = 0; // bytes transferred in this run (drives the speed readout)
+    this.bytesCompleted = 0; // bytes of every finished segment, including ones kept from an earlier run
     this.speed = speedometer(3);
     this.startTime = null;
+  }
+
+  /** Headers for a request to `url`: credentials stay with the playlist's own site. */
+  _headersFor(url) {
+    return scopeHeaders(this.playlistUrl, url, this.headers);
   }
 
   async start() {
@@ -74,7 +91,7 @@ class HlsDownloadTask extends EventEmitter {
       const variant = playlist.variants[this.variantIndex] || playlist.variants[0];
       if (!variant) throw new Error('No variants found in master playlist');
       this.emit('variant-selected', variant);
-      playlist = await resolvePlaylist(variant.url, this.headers);
+      playlist = await resolvePlaylist(variant.url, this._headersFor(variant.url));
     }
 
     if (!playlist.segments || !playlist.segments.length) {
@@ -108,15 +125,16 @@ class HlsDownloadTask extends EventEmitter {
 
     this.emit('start', { segments: this.segments.length, encrypted: playlist.encrypted });
 
-    if (this.mapUri) {
-      await this._downloadToFile(this.mapUri, path.join(this.segDir, 'init.mp4'));
-    }
+    await this._downloadMaps();
+    if (this.failed) return;
 
     // Download any AES-128 encryption keys locally using request headers
     await this._downloadKeys();
 
     await this._downloadSegments();
 
+    // 'error' has already been emitted by whichever segment gave up.
+    if (this.failed) return;
     if (this.cancelled) {
       this.emit('cancelled');
       return;
@@ -139,7 +157,7 @@ class HlsDownloadTask extends EventEmitter {
       workDir: this.workDir,
       usingTemp: this.usingTemp,
     });
-    this.emit('complete', { destPath: this.destPath });
+    this.emit('complete', { destPath: this.destPath, size: fileSize(this.destPath) || null });
   }
 
   pause() {
@@ -155,12 +173,17 @@ class HlsDownloadTask extends EventEmitter {
     const total = this.segments.length;
     const segmentsPerSec = elapsed > 0 ? this.completed / elapsed : 0;
     const eta = segmentsPerSec > 0 && total > 0 ? (total - this.completed) / segmentsPerSec : null;
+    // A playlist doesn't say how big the stream is; extrapolate from the
+    // segments finished so far so the Size column shows something useful.
+    const size = this.completed > 0 && total > 0 ? Math.round((this.bytesCompleted / this.completed) * total) : null;
     return {
       completed: this.completed,
       total,
       percent: total ? (this.completed / total) * 100 : 0,
       segmentsPerSec,
-      downloaded: this.downloadedBytes,
+      downloaded: this.bytesCompleted,
+      size,
+      sizeEstimated: size != null,
       speedBytesPerSec: this.speed(),
       eta,
     };
@@ -169,6 +192,25 @@ class HlsDownloadTask extends EventEmitter {
   segPath(seg) {
     const ext = this.mapUri ? 'm4s' : 'ts';
     return path.join(this.segDir, `seg_${String(seg.index).padStart(6, '0')}.${ext}`);
+  }
+
+  _mapKey(map) {
+    return `${map.uri}|${map.range ? `${map.range.start}-${map.range.end}` : ''}`;
+  }
+
+  /** Every distinct #EXT-X-MAP init segment, downloaded once each. */
+  async _downloadMaps() {
+    for (const seg of this.segments) {
+      if (!seg.map) continue;
+      const key = this._mapKey(seg.map);
+      if (this.maps.has(key)) continue;
+      const name = `init_${this.maps.size}.mp4`;
+      this.maps.set(key, name);
+      const dest = path.join(this.segDir, name);
+      if (fs.existsSync(dest)) continue;
+      await this._fetchWithRetry(seg.map.uri, dest, { range: seg.map.range, label: 'init segment' });
+      if (this.failed || this.cancelled || this.paused) return;
+    }
   }
 
   async _downloadKeys() {
@@ -192,16 +234,18 @@ class HlsDownloadTask extends EventEmitter {
     const total = this.segments.length;
 
     const worker = async () => {
-      while (nextIndex < total && !this.cancelled && !this.paused) {
+      while (nextIndex < total && !this.cancelled && !this.paused && !this.failed) {
         const seg = this.segments[nextIndex++];
         const finalPath = this.segPath(seg);
         if (fs.existsSync(finalPath)) {
           this.completed++;
+          this.bytesCompleted += fileSize(finalPath);
           continue;
         }
-        await this._downloadSegmentWithRetry(seg, finalPath);
-        if (!this.cancelled) {
+        const ok = await this._fetchWithRetry(seg.url, finalPath, { range: seg.range, count: true, index: seg.index });
+        if (ok) {
           this.completed++;
+          this.bytesCompleted += fileSize(finalPath);
           this.emit('progress', this.getProgress());
         }
       }
@@ -211,29 +255,35 @@ class HlsDownloadTask extends EventEmitter {
     await Promise.all(Array.from({ length: workerCount }, worker));
   }
 
-  async _downloadSegmentWithRetry(seg, finalPath) {
+  /** Resolves true once the file is on disk, false if stopped or failed. */
+  async _fetchWithRetry(url, finalPath, { range = null, count = false, index = null, label = 'segment' } = {}) {
     let attempt = 0;
-    while (!this.cancelled && !this.paused) {
+    while (!this.cancelled && !this.paused && !this.failed) {
       try {
-        await this._downloadToFile(seg.url, finalPath, { count: true });
-        return;
+        await this._downloadToFile(url, finalPath, { count, range });
+        return true;
       } catch (err) {
         attempt++;
-        this.emit('segment-error', { index: seg.index, attempt, error: err.message });
-        if (attempt > this.retries) {
-          this.cancelled = true;
-          this.emit('error', new Error(`Segment ${seg.index} failed after ${attempt} attempts: ${err.message}`));
-          return;
+        this.emit('segment-error', { index, attempt, error: err.message });
+        if (err.retryable === false || attempt > this.retries) {
+          if (!this.failed) {
+            this.failed = true;
+            const which = index != null ? `Segment ${index}` : `The ${label}`;
+            this.emit('error', new Error(`${which} failed after ${attempt} attempt(s): ${err.message}`));
+          }
+          return false;
         }
         await sleep(Math.min(500 * 2 ** attempt, 10000));
       }
     }
+    return false;
   }
 
-  _downloadToFile(url, finalPath, { count = false } = {}) {
+  _downloadToFile(url, finalPath, { count = false, range = null } = {}) {
     return streamToFile(url, finalPath, {
-      headers: this.headers,
+      headers: this._headersFor(url),
       rateLimiter: this.rateLimiter,
+      range,
       onBytes: count
         ? (len) => {
             this.downloadedBytes += len;
@@ -243,20 +293,34 @@ class HlsDownloadTask extends EventEmitter {
     });
   }
 
+  /**
+   * The playlist ffmpeg actually reads: every URI points at a local file, each
+   * byte-range slice is its own file, keys are local, and every encrypted
+   * segment carries an explicit IV — the local playlist renumbers from zero, so
+   * an IV left implicit would be derived from the wrong sequence number.
+   */
   _writeLocalPlaylist() {
-    const lines = ['#EXTM3U', '#EXT-X-VERSION:3'];
-    if (this.mapUri) {
-      lines.push('#EXT-X-MAP:URI="init.mp4"');
-    }
+    const lines = ['#EXTM3U', '#EXT-X-VERSION:6', '#EXT-X-MEDIA-SEQUENCE:0'];
 
     let lastKeySignature;
+    let lastMap = null;
     for (const seg of this.segments) {
-      const sig = seg.key ? `${seg.key.method}|${seg.key.uri}|${seg.key.iv || ''}` : null;
+      if (seg.discontinuity) lines.push('#EXT-X-DISCONTINUITY');
+
+      if (seg.map) {
+        const local = this.maps.get(this._mapKey(seg.map));
+        if (local && local !== lastMap) {
+          lines.push(`#EXT-X-MAP:URI="${local}"`);
+          lastMap = local;
+        }
+      }
+
+      const iv = seg.key ? segmentIv(seg) : null;
+      const sig = seg.key ? `${seg.key.method}|${seg.key.uri}|${iv}` : null;
       if (sig !== lastKeySignature) {
         if (seg.key) {
-          const ivPart = seg.key.iv ? `,IV=${seg.key.iv}` : '';
           const localKey = this.keysMap.get(seg.key.uri) || seg.key.uri;
-          lines.push(`#EXT-X-KEY:METHOD=${seg.key.method},URI="${localKey}"${ivPart}`);
+          lines.push(`#EXT-X-KEY:METHOD=${seg.key.method},URI="${localKey}",IV=${iv}`);
         } else {
           lines.push('#EXT-X-KEY:METHOD=NONE');
         }
@@ -274,11 +338,21 @@ class HlsDownloadTask extends EventEmitter {
 
   _remux(localPlaylistPath) {
     return new Promise((resolve, reject) => {
-      const args = ['-y', '-f', 'hls', '-allowed_extensions', 'ALL', '-i', localPlaylistPath, '-c', 'copy', this.workPath];
-      const proc = spawn(this.ffmpegPath, args, { cwd: this.segDir });
+      const args = [
+        '-y',
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-f', 'hls',
+        '-allowed_extensions', 'ALL',
+        '-i', localPlaylistPath,
+        '-c', 'copy',
+        this.workPath,
+      ];
+      const proc = spawn(this.ffmpegPath, args, { cwd: this.segDir, windowsHide: true });
       let stderr = '';
       proc.stderr.on('data', (d) => {
         stderr += d.toString();
+        if (stderr.length > 64 * 1024) stderr = stderr.slice(-32 * 1024);
       });
       proc.on('error', (err) => {
         if (err && err.code === 'ENOENT') {

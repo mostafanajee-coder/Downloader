@@ -5,7 +5,9 @@ const { request } = require('./httpUtils');
 const m3u8Parser = require('m3u8-parser');
 
 async function fetchText(urlStr, headers = {}) {
-  const { res, finalUrl } = await request(urlStr, { method: 'GET', headers });
+  // Playlists are small: a whole-request cap is right here (a stuck fetch
+  // would otherwise hold the download at "starting" forever).
+  const { res, finalUrl } = await request(urlStr, { method: 'GET', headers, totalTimeoutMs: 60000 });
   if (res.statusCode < 200 || res.statusCode >= 300) {
     res.resume();
     throw new Error(`Failed to fetch playlist: HTTP ${res.statusCode} for ${urlStr}`);
@@ -47,27 +49,45 @@ function parseMediaPlaylist(text, baseUrl) {
 
   const manifest = parser.manifest;
   const segments = [];
+  const mediaSequence = Number.isFinite(manifest.mediaSequence) ? manifest.mediaSequence : 0;
 
   let mapUri = null;
+  let mapRange = null;
   if (manifest.segments && manifest.segments.length > 0) {
     for (let i = 0; i < manifest.segments.length; i++) {
       const seg = manifest.segments[i];
-      if (seg.map && seg.map.uri) mapUri = new URL(seg.map.uri, baseUrl).toString();
+      // m3u8-parser carries the current #EXT-X-MAP onto every segment after
+      // it. A playlist may switch init segments (typically at a
+      // discontinuity), so each segment keeps its own.
+      let map = null;
+      if (seg.map && seg.map.uri) {
+        map = { uri: new URL(seg.map.uri, baseUrl).toString(), range: toRange(seg.map.byterange) };
+        if (!mapUri) {
+          mapUri = map.uri;
+          mapRange = map.range;
+        }
+      }
 
       let key = null;
       if (seg.key && seg.key.method && seg.key.method !== 'NONE') {
         key = {
           method: seg.key.method,
           uri: seg.key.uri ? new URL(seg.key.uri, baseUrl).toString() : null,
-          iv: seg.key.iv || null,
+          iv: ivToHex(seg.key.iv),
         };
       }
 
       segments.push({
         index: i,
+        // The number the spec derives an implicit AES-128 IV from.
+        sequence: mediaSequence + i,
         url: new URL(seg.uri, baseUrl).toString(),
         duration: seg.duration,
         key,
+        // #EXT-X-BYTERANGE: this segment is a slice of a larger resource.
+        range: toRange(seg.byterange),
+        discontinuity: Boolean(seg.discontinuity),
+        map,
       });
     }
   }
@@ -82,7 +102,46 @@ function parseMediaPlaylist(text, baseUrl) {
   // AES-128 with a URI is fine — we download the key and ffmpeg decrypts.
   const drm = detectHlsDrm(text, segments);
 
-  return { segments, mapUri, encrypted: Boolean(segments.find((s) => s.key)), live, drm };
+  return { segments, mapUri, mapRange, mediaSequence, encrypted: Boolean(segments.find((s) => s.key)), live, drm };
+}
+
+/** m3u8-parser's { length, offset } -> inclusive { start, end }, or null. */
+function toRange(byterange) {
+  if (!byterange || !Number.isFinite(byterange.length) || byterange.length <= 0) return null;
+  const start = Number.isFinite(byterange.offset) ? byterange.offset : 0;
+  return { start, end: start + byterange.length - 1 };
+}
+
+/**
+ * m3u8-parser hands IVs back as a Uint32Array. Interpolated straight into the
+ * local playlist that became "IV=19088743,2309737967,..." — which ffmpeg does
+ * not recognise as an IV at all, silently falling back to the sequence number
+ * and decrypting every segment into noise. Normalise to the 0x-hex form the
+ * playlist syntax requires.
+ */
+function ivToHex(iv) {
+  if (iv == null) return null;
+  if (typeof iv === 'string') {
+    const hex = iv.replace(/^0x/i, '');
+    return /^[0-9a-f]{1,32}$/i.test(hex) ? `0x${hex.padStart(32, '0').toLowerCase()}` : null;
+  }
+  if (ArrayBuffer.isView(iv) || Array.isArray(iv)) {
+    const words = Array.from(iv);
+    if (words.length !== 4) return null;
+    return `0x${words.map((w) => (Number(w) >>> 0).toString(16).padStart(8, '0')).join('')}`;
+  }
+  return null;
+}
+
+/**
+ * The IV a segment is decrypted with: its explicit IV, or — per RFC 8216
+ * §5.2 — its media sequence number as a 128-bit big-endian integer. Written
+ * out explicitly because the local playlist renumbers segments from zero.
+ */
+function segmentIv(seg) {
+  if (seg.key && seg.key.iv) return seg.key.iv;
+  const seq = BigInt(Math.max(0, Math.floor(Number(seg.sequence) || 0)));
+  return `0x${seq.toString(16).padStart(32, '0')}`;
 }
 
 // Friendly names for the DRM systems that show up in HLS playlists. Newer
@@ -120,4 +179,4 @@ async function resolvePlaylist(urlStr, headers = {}) {
   return { type: 'media', ...media, finalUrl };
 }
 
-module.exports = { resolvePlaylist, parseMasterPlaylist, parseMediaPlaylist, fetchText };
+module.exports = { resolvePlaylist, parseMasterPlaylist, parseMediaPlaylist, fetchText, ivToHex, segmentIv };

@@ -76,10 +76,30 @@ const DEFAULT_CONFIG = {
   lastUsedCategory: 'General'
 };
 
+function isPlainObject(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+/**
+ * Saved values over defaults, recursively for nested sections. A plain spread
+ * replaced whole sections: a config saved before `schedule.quota` existed came
+ * back with no quota at all, and every new nested setting was silently missing
+ * for existing users until they happened to re-save that dialog.
+ */
+function mergeWithDefaults(defaults, saved) {
+  if (!isPlainObject(saved)) return defaults;
+  const out = { ...defaults };
+  for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) continue;
+    out[key] = isPlainObject(defaults[key]) && isPlainObject(value) ? mergeWithDefaults(defaults[key], value) : value;
+  }
+  return out;
+}
+
 class ConfigManager {
   constructor(stateDir) {
     this.configPath = path.join(stateDir, 'config.json');
-    this.config = { ...DEFAULT_CONFIG };
+    this.config = mergeWithDefaults(DEFAULT_CONFIG, {});
     this.load();
   }
 
@@ -87,18 +107,28 @@ class ConfigManager {
     try {
       if (fs.existsSync(this.configPath)) {
         const data = fs.readFileSync(this.configPath, 'utf8');
-        const parsed = JSON.parse(data);
-        this.config = { ...this.config, ...parsed };
+        this.config = mergeWithDefaults(DEFAULT_CONFIG, JSON.parse(data));
       }
     } catch (e) {
       console.error('Failed to load config', e);
+      // Keep the unreadable file for inspection instead of overwriting the
+      // user's settings with defaults on the next save.
+      try {
+        fs.copyFileSync(this.configPath, `${this.configPath}.corrupt-${Date.now()}`);
+      } catch (copyErr) {
+        /* nothing more we can do */
+      }
     }
     this.applySystemSettings();
   }
 
   save() {
     try {
-      fs.writeFileSync(this.configPath, JSON.stringify(this.config, null, 2), 'utf8');
+      // Write-then-rename, like the download sidecars: a crash mid-write used
+      // to leave truncated JSON and every setting reset on the next launch.
+      const tmp = `${this.configPath}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(this.config, null, 2), 'utf8');
+      fs.renameSync(tmp, this.configPath);
       this.applySystemSettings();
     } catch (e) {
       console.error('Failed to save config', e);
@@ -125,14 +155,20 @@ class ConfigManager {
 
   applySystemSettings() {
     // Apply Startup setting
-    const currentSettings = app.getLoginItemSettings();
-    if (this.config.startup !== currentSettings.openAtLogin) {
-      app.setLoginItemSettings({
-        openAtLogin: this.config.startup,
-        openAsHidden: true
-      });
+    try {
+      const currentSettings = app.getLoginItemSettings();
+      if (Boolean(this.config.startup) !== currentSettings.openAtLogin) {
+        app.setLoginItemSettings({
+          openAtLogin: Boolean(this.config.startup),
+          openAsHidden: true,
+          // Launched at login, the app belongs in the tray, not in the user's face.
+          args: this.config.startup ? ['--hidden'] : [],
+        });
+      }
+    } catch (e) {
+      console.warn('Could not update the start-with-Windows setting:', e.message);
     }
   }
 }
 
-module.exports = { ConfigManager };
+module.exports = { ConfigManager, DEFAULT_CONFIG, mergeWithDefaults };

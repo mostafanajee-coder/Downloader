@@ -16,6 +16,13 @@ const userDataDir = app.getPath('userData');
 const stateDir = path.join(userDataDir, 'downloader-state');
 const downloadsDir = app.getPath('downloads');
 
+// The extension always talks to 9333. The override exists so a development or
+// test instance can run beside the real one without catching its downloads.
+const BRIDGE_PORT = (() => {
+  const n = Number(process.env.DOWNLOADER_BRIDGE_PORT);
+  return Number.isInteger(n) && n > 0 && n < 65536 ? n : 9333;
+})();
+
 let manager;
 let bridge;
 let mainWindow;
@@ -27,6 +34,10 @@ let power;
 let powerBlockerId = null; // powerSaveBlocker handle while downloads are active
 let clipboardTimer = null;
 let lastClipboardText = null;
+let shutdownStarted = false;
+
+// Launched by "Start with Windows": come up in the tray, not in the user's face.
+const startHidden = process.argv.includes('--hidden');
 
 function sendToWindow(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -34,20 +45,36 @@ function sendToWindow(channel, payload) {
   }
 }
 
-function createWindow() {
+function createWindow({ show = true } = {}) {
   mainWindow = new BrowserWindow({
-    width: 1120,
-    height: 700,
+    // Wide enough for the default column widths (~990px) beside the category
+    // tree; at 1120 the Description column started off-screen behind a
+    // horizontal scrollbar.
+    width: 1240,
+    height: 720,
     minWidth: 820,
     minHeight: 480,
     backgroundColor: '#1c1f26',
+    show,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   });
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  // The preload exposes powerful IPC (open a file, delete a file, change
+  // settings). The window must only ever show our own page: a dropped link or
+  // a stray <a href> navigating it would hand that API to a remote site.
+  const appPage = mainWindow.webContents;
+  appPage.on('will-navigate', (e) => e.preventDefault());
+  appPage.on('will-redirect', (e) => e.preventDefault());
+  appPage.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
 
   // Minimize / close to the system tray instead of quitting (classic IDM
   // behavior — the app keeps running in the tray to catch browser downloads).
@@ -280,13 +307,7 @@ function createTray() {
       },
     },
     { type: 'separator' },
-    {
-      label: 'Exit',
-      click: () => {
-        app.isQuitting = true;
-        app.quit();
-      },
-    },
+    { label: 'Exit', click: quitApp },
   ]);
 
   tray.setToolTip('Internet Download Manager');
@@ -298,13 +319,22 @@ function handleCommandLine(argv) {
   if (!manager || !argv) return;
   const dlIndex = argv.indexOf('--download');
   if (dlIndex !== -1 && argv.length > dlIndex + 1) {
-    const url = argv[dlIndex + 1];
+    const url = String(argv[dlIndex + 1] || '').trim();
+    if (!/^(https?|ftp):\/\//i.test(url)) {
+      console.warn('[handleCommandLine] Ignoring --download with a non-http(s)/ftp URL');
+      return;
+    }
     try {
-      manager.add({ url });
+      manager.add({ url, noBatch: true });
     } catch (err) {
       console.warn('[handleCommandLine] Failed to add URL from command line:', err.message);
     }
   }
+}
+
+function quitApp() {
+  app.isQuitting = true;
+  app.quit();
 }
 
 // Last-resort safety nets. A packaged .exe has no visible console, so a bare
@@ -374,12 +404,7 @@ async function bootstrap() {
 
   wireManagerEvents();
 
-  power = new PowerManager({
-    exitApp: () => {
-      app.isQuitting = true;
-      app.quit();
-    },
-  });
+  power = new PowerManager({ exitApp: quitApp });
   scheduler = new ScheduleManager({ manager, config, power });
   scheduler.on('fired', (e) => sendToWindow('schedule:event', { type: 'fired', ...e }));
   scheduler.on('quota-exceeded', (e) => {
@@ -395,7 +420,7 @@ async function bootstrap() {
   syncClipboardMonitor();
 
   try {
-    bridge = await createBridgeServer({ manager, port: 9333 });
+    bridge = await createBridgeServer({ manager, port: BRIDGE_PORT });
   } catch (e) {
     console.warn('Bridge failed to start, continuing in UI-only mode:', e.message);
   }
@@ -409,12 +434,14 @@ async function bootstrap() {
   if (!bridge || !bridge.httpServer) {
     notifyUser(
       'Downloader — browser integration unavailable',
-      'Port 9333 is in use by another program, so the browser extension cannot connect. Downloads added from the app itself still work.'
+      `Port ${BRIDGE_PORT} is in use by another program, so the browser extension cannot connect. Downloads added from the app itself still work.`
     );
   }
 
-  createWindow();
+  createWindow({ show: !startHidden });
   createTray();
+  // Without a tray there would be no way to reach a hidden window.
+  if (startHidden && !tray) showMainWindow();
   handleCommandLine(process.argv);
 
   app.on('activate', () => {
@@ -423,8 +450,19 @@ async function bootstrap() {
   });
 }
 
-app.on('before-quit', () => {
+app.on('before-quit', (e) => {
   app.isQuitting = true;
+  // Give running transfers a moment to flush their bytes and sidecars rather
+  // than being killed mid-write, then quit for real. Bounded, so a wedged
+  // download can never keep the app from closing.
+  if (!shutdownStarted && manager && typeof manager.shutdown === 'function') {
+    shutdownStarted = true;
+    e.preventDefault();
+    Promise.resolve()
+      .then(() => manager.shutdown({ timeoutMs: 4000 }))
+      .catch((err) => console.warn('[Shutdown]', err && err.message))
+      .finally(() => app.quit());
+  }
 });
 
 app.on('window-all-closed', () => {
@@ -457,6 +495,9 @@ ipcMain.handle('queue:startQueue', (_event, queueId) => manager.startQueue(queue
 ipcMain.handle('queue:stopQueue', (_event, queueId) => manager.stopQueue(queueId));
 ipcMain.handle('queue:isQueueRunning', () => manager.isQueueRunning());
 ipcMain.handle('queue:reorder', (_event, { id, delta }) => manager.reorder(id, delta));
+ipcMain.handle('queue:redownload', (_event, id) => manager.redownload(id));
+ipcMain.handle('queue:probe', (_event, url) => manager.probeUrl(url));
+ipcMain.handle('app:quit', () => quitApp());
 
 // --- Named queues -----------------------------------------------------------
 ipcMain.handle('queues:list', () => manager.listQueues());
@@ -470,12 +511,15 @@ ipcMain.handle('queues:move', (_event, { ids, queueId }) => manager.moveToQueue(
 
 ipcMain.handle('config:get', () => config.getAll());
 ipcMain.handle('config:set', (_event, newConfig) => {
+  if (!newConfig || typeof newConfig !== 'object' || Array.isArray(newConfig)) return;
   config.setAll(newConfig);
   // Apply the (possibly changed) global speed limit to running downloads live.
   manager.updateSpeedLimit();
   manager.updateHttpSettings();
   if (scheduler) scheduler.update();
   syncClipboardMonitor();
+  // File Types / exclusions changed? The extension learns immediately.
+  if (bridge && typeof bridge.pushConfig === 'function') bridge.pushConfig();
 });
 
 // --- Scheduler / power ------------------------------------------------------

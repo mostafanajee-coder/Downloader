@@ -76,13 +76,24 @@ function closeMenus() {
   document.querySelectorAll(`.${MENU_CLASS}`).forEach((m) => m.remove());
 }
 
+// runtime.sendMessage rejects while the service worker is (re)starting and
+// throws once the extension has been reloaded under a live page. Either way the
+// page must not collect uncaught errors, and the caller gets `null`.
+async function sendToExtension(msg) {
+  try {
+    return await chrome.runtime.sendMessage(msg);
+  } catch (e) {
+    return null;
+  }
+}
+
 async function buildMenuItems(video) {
   const items = [];
   let bgItems = [];
   let subtitles = [];
 
   try {
-    const sendMessagePromise = chrome.runtime.sendMessage({ type: 'get-media-for-tab' });
+    const sendMessagePromise = sendToExtension({ type: 'get-media-for-tab' });
     const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), 1500));
     const res = await Promise.race([sendMessagePromise, timeoutPromise]);
     if (res) {
@@ -127,15 +138,9 @@ async function buildMenuItems(video) {
     }
   } catch (e) {}
 
-  // Fallback: Guarantee no empty list
-  if (!items.length) {
-    const fallbackUrl = (directSrc && !directSrc.startsWith('blob:')) ? directSrc : window.location.href;
-    items.push({
-      label: `${titleClean || 'Video'} - Download Page Video Stream`,
-      kind: fallbackUrl.includes('.m3u8') ? 'hls' : 'file',
-      url: fallbackUrl,
-    });
-  }
+  // No fallback to the page's own URL: that "video" was the HTML document,
+  // and the app dutifully saved a web page under a video's name. An empty list
+  // shows "No video link captured yet" instead, which is the truth.
 
   const subItems = [];
   video.querySelectorAll('track').forEach((track) => {
@@ -221,7 +226,7 @@ async function onButtonClick(video, btn) {
 
     row.addEventListener('click', async () => {
       labelSpan.textContent = `${item.label} — sending...`;
-      const res = await chrome.runtime.sendMessage({
+      const res = await sendToExtension({
         type: 'download-media',
         url: item.url,
         kind: item.kind,
@@ -245,7 +250,7 @@ async function onButtonClick(video, btn) {
       row.textContent = item.label;
       row.addEventListener('click', async () => {
         row.textContent = `${item.label} — sending...`;
-        const res = await chrome.runtime.sendMessage({ type: 'download-media', url: item.url, kind: 'file', title: `${pageTitleClean}_sub` });
+        const res = await sendToExtension({ type: 'download-media', url: item.url, kind: 'file', title: `${pageTitleClean}_sub` });
         row.textContent = res?.sent ? `${item.label} ✓ Sent to IDM` : `${item.label} — IDM not connected`;
         setTimeout(closeMenus, 1200);
       });
@@ -479,11 +484,7 @@ window.addEventListener('blur', () => {
 document.addEventListener('mousedown', (e) => {
   const force = comboActive(captureKeys.force, e);
   const bypass = comboActive(captureKeys.bypass, e);
-  try {
-    chrome.runtime.sendMessage({ type: 'capture-hint', force, bypass });
-  } catch (err) {
-    // Extension context invalidated (reload/update) — nothing to do.
-  }
+  sendToExtension({ type: 'capture-hint', force, bypass });
 }, true);
 
 if (chrome.storage && chrome.storage.onChanged) {

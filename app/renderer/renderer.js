@@ -216,15 +216,33 @@ const SORT_STORAGE_KEY = 'idm.sort.v1';
 let sortState = null; // { key, dir: 1 | -1 } or null
 
 const SORT_ACCESSORS = {
-  name: (i) => (i.filename || i.url || '').toLowerCase(),
+  name: (i) => displayNameOf(i).toLowerCase(),
   q: (i) => (i.status === 'held' || i.status === 'queued' ? 1 : 0),
   size: (i) => (i.size == null ? -1 : i.size),
   status: (i) => i.status || '',
   eta: (i) => (i.status === 'running' && i.progress && i.progress.eta != null ? i.progress.eta : Number.MAX_SAFE_INTEGER),
   speed: (i) => (i.status === 'running' && i.progress ? i.progress.speedBytesPerSec || 0 : -1),
-  date: (i) => i.addedAt || 0,
-  description: (i) => (i.description || '').toLowerCase(),
+  date: (i) => lastTryOf(i),
+  description: (i) => descriptionOf(i).toLowerCase(),
 };
+
+/** What a row is called: the server's name once known, else what was asked for. */
+function displayNameOf(item) {
+  return item.displayName || item.filename || item.url || '';
+}
+
+/** IDM's "Last try date": the latest of added / started / finished. */
+function lastTryOf(item) {
+  return item.completedAt || item.startedAt || item.addedAt || 0;
+}
+
+/** The Description column: why a download failed, or what kind of stream it is. */
+function descriptionOf(item) {
+  if (item.status === 'error' && item.error) return item.error;
+  if (item.kind === 'hls') return 'HLS stream';
+  if (item.kind === 'dash') return 'MPEG-DASH stream';
+  return '';
+}
 
 function loadSortState() {
   try {
@@ -315,95 +333,173 @@ function visibleItems() {
 }
 
 // 2. Render Table Rows
-function render() {
-  queueBody.innerHTML = '';
+//
+// Rows are keyed by download id and only rebuilt when something they display
+// has changed. The table used to be torn down and rebuilt in full — every row,
+// every listener — ten times a second while anything was downloading, so a
+// list of a few hundred finished downloads made the whole window stutter just
+// because one file was moving. Now an idle row costs a string comparison.
+const rowCache = new Map(); // id -> { tr, sig }
 
-  pruneSelection();
-  const filtered = visibleItems();
+function rowSizeText(item) {
+  const text = formatBytes(item.size);
+  // A stream's size is extrapolated from the segments fetched so far.
+  const estimated = item.status !== 'completed' && item.progress && item.progress.sizeEstimated;
+  return estimated && item.size != null ? `~${text}` : text;
+}
 
-  for (const item of filtered) {
-    const tr = document.createElement('tr');
-    tr.dataset.id = item.id;
-    if (selectedIds.has(item.id)) tr.classList.add('selected');
+function rowCells(item) {
+  const isRunning = item.status === 'running';
+  const isPaused = item.status === 'paused';
+  const isHeld = item.status === 'held';
+  const rawPercent = item.progress?.percent != null ? item.progress.percent : item.status === 'completed' ? 100 : 0;
+  const pct = Math.max(0, Math.min(100, rawPercent || 0));
+  const lastTry = lastTryOf(item);
+  return {
+    name: displayNameOf(item),
+    icon: fileIconKeyFor(item.kind === 'hls' || item.kind === 'dash' ? 'x.mp4' : displayNameOf(item)),
+    q: isHeld || item.status === 'queued',
+    size: rowSizeText(item),
+    status: statusLabel(item),
+    bar: isRunning || isPaused ? pct.toFixed(1) : null,
+    paused: isPaused,
+    held: isHeld,
+    error: item.status === 'error',
+    eta: isRunning && item.progress?.eta ? formatTimeLeft(item.progress.eta) : '—',
+    speed: isRunning ? formatSpeed(item.progress?.speedBytesPerSec) : '—',
+    date: lastTry
+      ? new Date(lastTry).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      : '—',
+    desc: descriptionOf(item) || '—',
+  };
+}
 
-    const isDone = item.status === 'completed';
-    const isError = item.status === 'error';
-    const isRunning = item.status === 'running';
-
-    const isHeld = item.status === 'held';
-    let statusText = 'Complete';
-    if (isRunning) statusText = 'Downloading';
-    else if (item.status === 'paused') statusText = 'Paused';
-    else if (isError) statusText = 'Error';
-    else if (item.status === 'queued') statusText = 'Queued';
-    else if (isHeld) statusText = 'On Hold';
-
-    const ext = (item.filename || '').split('.').pop().toLowerCase();
-    const iconSymbol = ext === 'zip' || ext === 'rar' ? '📁' : '🎬';
-
-    // Signature IDM inline progress bar for in-flight / paused rows.
-    const rawPercent = item.progress?.percent != null ? item.progress.percent : isDone ? 100 : 0;
-    const pct = Math.max(0, Math.min(100, rawPercent || 0));
-    let statusCell;
-    if (isRunning || item.status === 'paused') {
-      statusCell = `<div class="idm-progress" title="${pct.toFixed(1)}%"><div class="idm-progress-fill${
-        item.status === 'paused' ? ' paused' : ''
-      }" style="width:${pct}%"></div><span class="idm-progress-text">${pct.toFixed(1)}%</span></div>`;
-    } else if (isHeld) {
-      statusCell = `<span class="status-held">${escapeHtml(statusText)}</span>`;
-    } else {
-      statusCell = escapeHtml(statusText);
-    }
-
-    // Q column: mark items that belong to the queue (waiting to start / on hold).
-    const qCell = isHeld || item.status === 'queued' ? '<span class="q-mark" title="In queue"></span>' : '';
-
-    tr.innerHTML = `
+function rowHtml(c) {
+  let statusCell;
+  if (c.bar != null) {
+    statusCell = `<div class="idm-progress" title="${c.bar}%"><div class="idm-progress-fill${c.paused ? ' paused' : ''}" style="width:${c.bar}%"></div><span class="idm-progress-text">${c.bar}%</span></div>`;
+  } else if (c.held) {
+    statusCell = `<span class="status-held">${escapeHtml(c.status)}</span>`;
+  } else if (c.error) {
+    statusCell = `<span class="status-error">${escapeHtml(c.status)}</span>`;
+  } else {
+    statusCell = escapeHtml(c.status);
+  }
+  return `
       <td class="col-name">
         <div class="cell-name">
-          <span>${iconSymbol}</span>
-          <span class="cell-name-text">${escapeHtml(item.filename || item.url)}</span>
+          <span class="row-icon">${rowIcon(c.icon)}</span>
+          <span class="cell-name-text" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</span>
         </div>
       </td>
-      <td class="col-q">${qCell}</td>
-      <td class="col-size">${formatBytes(item.size)}</td>
+      <td class="col-q">${c.q ? '<span class="q-mark" title="In queue"></span>' : ''}</td>
+      <td class="col-size">${escapeHtml(c.size)}</td>
       <td class="col-status">${statusCell}</td>
-      <td class="col-eta">${isRunning && item.progress?.eta ? formatTimeLeft(item.progress.eta) : '—'}</td>
-      <td class="col-speed">${isRunning ? formatSpeed(item.progress?.speedBytesPerSec) : '—'}</td>
-      <td class="col-date">${item.addedAt ? new Date(item.addedAt).toLocaleDateString() : '—'}</td>
-      <td>${escapeHtml(item.description || '—')}</td>
+      <td class="col-eta">${escapeHtml(c.eta)}</td>
+      <td class="col-speed">${escapeHtml(c.speed)}</td>
+      <td class="col-date">${escapeHtml(c.date)}</td>
+      <td class="col-desc" title="${escapeHtml(c.desc)}">${escapeHtml(c.desc)}</td>
     `;
+}
 
-    tr.addEventListener('click', (e) => handleRowClick(e, item.id));
-    tr.addEventListener('dblclick', () => {
-      // Finished: open the file, as before. Still going: show the live
-      // per-connection view, which is what double-click does in IDM.
-      if (isDone) {
-        if (item.destPath && window.api.openFile) window.api.openFile(item.destPath);
-      } else {
-        showProgressModal(items.get(item.id) || item);
-      }
-    });
-    tr.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      // Right-clicking inside an existing multi-selection keeps it (so the
-      // menu acts on all of them); right-clicking outside it selects just
-      // that row first, exactly like Explorer.
-      if (!selectedIds.has(item.id)) selectOnly(item.id);
-      showContextMenu(e.clientX, e.clientY);
-    });
+// Small type icon for a table row. Uses the gradients defined once in the
+// document (see ensureSharedIconDefs) instead of repeating them per row.
+function rowIcon(name) {
+  const body = (typeof ICONS !== 'undefined' && ICONS[name]) || '';
+  return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
+}
 
-    queueBody.appendChild(tr);
+function ensureSharedIconDefs() {
+  if (document.getElementById('shared-icon-defs') || typeof DEFS === 'undefined') return;
+  const holder = document.createElement('div');
+  holder.innerHTML = `<svg id="shared-icon-defs" width="0" height="0" style="position:absolute" aria-hidden="true">${DEFS}</svg>`;
+  document.body.appendChild(holder.firstElementChild);
+}
+
+function render() {
+  pruneSelection();
+  const filtered = visibleItems();
+  const wanted = new Set(filtered.map((i) => i.id));
+
+  for (const [id, entry] of rowCache) {
+    if (!wanted.has(id)) {
+      entry.tr.remove();
+      rowCache.delete(id);
+    }
+  }
+
+  let previous = null;
+  for (const item of filtered) {
+    let entry = rowCache.get(item.id);
+    if (!entry) {
+      const tr = document.createElement('tr');
+      tr.dataset.id = item.id;
+      entry = { tr, sig: '' };
+      rowCache.set(item.id, entry);
+    }
+    const cells = rowCells(item);
+    const sig = JSON.stringify(cells);
+    if (sig !== entry.sig) {
+      entry.tr.innerHTML = rowHtml(cells);
+      entry.sig = sig;
+    }
+    entry.tr.classList.toggle('selected', selectedIds.has(item.id));
+    entry.tr.classList.toggle('row-error', cells.error);
+
+    // Keep DOM order equal to display order, moving only what's out of place.
+    const expected = previous ? previous.nextSibling : queueBody.firstChild;
+    if (entry.tr !== expected) queueBody.insertBefore(entry.tr, expected);
+    previous = entry.tr;
   }
 
   // Statusbar Update
-  const activeCount = Array.from(items.values()).filter((i) => i.status === 'running').length;
-  const totalSpeed = Array.from(items.values()).reduce((sum, i) => sum + (i.status === 'running' ? i.progress?.speedBytesPerSec || 0 : 0), 0);
+  let activeCount = 0;
+  let totalSpeed = 0;
+  for (const i of items.values()) {
+    if (i.status !== 'running') continue;
+    activeCount++;
+    totalSpeed += i.progress?.speedBytesPerSec || 0;
+  }
 
-  if (statusActive) statusActive.textContent = `${activeCount} active downloads`;
+  if (statusActive) statusActive.textContent = `${activeCount} active download${activeCount === 1 ? '' : 's'}`;
   if (statusSpeed) statusSpeed.textContent = `Total speed: ${formatSpeed(totalSpeed)}`;
   updateSelectionCount();
 }
+
+// One set of listeners for the whole table, resolved to a row by its data-id,
+// instead of three fresh closures per row on every repaint.
+function rowIdFromEvent(e) {
+  const tr = e.target.closest('tr[data-id]');
+  return tr && queueBody.contains(tr) ? tr.dataset.id : null;
+}
+
+queueBody.addEventListener('click', (e) => {
+  const id = rowIdFromEvent(e);
+  if (id) handleRowClick(e, id);
+});
+
+queueBody.addEventListener('dblclick', (e) => {
+  const item = items.get(rowIdFromEvent(e));
+  if (!item) return;
+  // Finished: open the file. Still going: show the live per-connection view,
+  // which is what double-click does in IDM.
+  if (item.status === 'completed') {
+    if (item.destPath && window.api.openFile) window.api.openFile(item.destPath);
+  } else {
+    showProgressModal(item);
+  }
+});
+
+queueBody.addEventListener('contextmenu', (e) => {
+  const id = rowIdFromEvent(e);
+  if (!id) return;
+  e.preventDefault();
+  // Right-clicking inside an existing multi-selection keeps it (so the menu
+  // acts on all of them); right-clicking outside it selects just that row
+  // first, exactly like Explorer.
+  if (!selectedIds.has(id)) selectOnly(id);
+  showContextMenu(e.clientX, e.clientY);
+});
 
 // --- Multi-row selection ----------------------------------------------------
 // Selection is deliberately decoupled from render(): changing it only toggles
@@ -598,44 +694,165 @@ function pasteUrlIntoAddModal() {
 }
 
 // Download Info Modal Actions
-function showDownloadInfoModal(url) {
+//
+// IDM's "Download File Info" dialog: the real file name, size and category
+// (from a probe of the server), and a Save As path the user can change. This
+// used to show a hard-coded path from the developer's machine and a size that
+// said "Calculating..." forever — and whatever the user picked was thrown away,
+// because Start only ever sent the bare URL.
+let infoState = null; // { url, kind, filename, category, pathEdited }
+let infoProbeSeq = 0;
+
+function splitSavePath(p) {
+  const s = String(p || '').trim();
+  const cut = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/'));
+  return cut === -1 ? { dir: '', name: s } : { dir: s.slice(0, cut), name: s.slice(cut + 1) };
+}
+
+function joinSavePath(dir, name) {
+  if (!dir) return name || '';
+  return `${String(dir).replace(/[\\/]+$/, '')}\\${name || ''}`;
+}
+
+function categoryDir(category) {
+  const dirs = appConfig.destDirs || {};
+  return dirs[category] || dirs.General || '';
+}
+
+function guessKind(url) {
+  if (/\.m3u8?(\?|#|$)/i.test(url)) return 'hls';
+  if (/\.mpd(\?|#|$)/i.test(url)) return 'dash';
+  return 'file';
+}
+
+function nameFromUrl(url) {
+  try {
+    const last = new URL(url).pathname.split('/').pop() || '';
+    try {
+      return decodeURIComponent(last);
+    } catch (e) {
+      return last;
+    }
+  } catch (e) {
+    return '';
+  }
+}
+
+async function showDownloadInfoModal(url) {
+  // Options → General: skip the dialog and start straight away.
+  if (appConfig.showStartDialog === false) {
+    if (window.api.add) window.api.add({ url, kind: guessKind(url), noBatch: true });
+    return;
+  }
+
   pendingDownloadUrl = url;
+  const seq = ++infoProbeSeq;
+  const provisional = nameFromUrl(url) || 'download';
+  const provisionalCategory = categoryOf({ kind: guessKind(url), filename: provisional });
+  infoState = { url, kind: guessKind(url), filename: provisional, category: provisionalCategory, pathEdited: false };
+
   if (infoUrlInput) infoUrlInput.value = url;
-  if (infoDestInput) infoDestInput.value = `C:\\Users\\kingm\\OneDrive\\Desktop\\Downloader\\downloads\\${url.split('/').pop().split('?')[0] || 'file.bin'}`;
-  if (infoSizeDisplay) infoSizeDisplay.value = 'Calculating...';
+  if (infoCategorySelect) infoCategorySelect.value = capitalizeCategory(provisionalCategory);
+  if (infoDestInput) infoDestInput.value = joinSavePath(categoryDir(capitalizeCategory(provisionalCategory)), provisional);
+  if (infoSizeDisplay) infoSizeDisplay.value = 'Checking…';
+  if (infoStartBtn) infoStartBtn.disabled = false;
   if (downloadInfoModal) downloadInfoModal.classList.remove('hidden');
+
+  if (!window.api.probe) {
+    if (infoSizeDisplay) infoSizeDisplay.value = 'Unknown';
+    return;
+  }
+  let info;
+  try {
+    info = await window.api.probe(url);
+  } catch (e) {
+    info = { ok: false, error: e.message };
+  }
+  // The user may have closed this dialog, or opened it for another URL.
+  if (seq !== infoProbeSeq || !infoState || downloadInfoModal.classList.contains('hidden')) return;
+
+  if (info && info.filename) {
+    infoState.kind = info.kind || infoState.kind;
+    infoState.filename = info.filename;
+    infoState.category = info.category || infoState.category;
+    if (infoCategorySelect) infoCategorySelect.value = capitalizeCategory(infoState.category);
+    if (!infoState.pathEdited && infoDestInput) {
+      infoDestInput.value = joinSavePath(info.destDir || categoryDir(capitalizeCategory(infoState.category)), info.filename);
+    }
+  }
+  if (infoSizeDisplay) {
+    if (info && info.ok && info.size != null) {
+      infoSizeDisplay.value = `${formatBytes(info.size)}${info.resumable === false ? ' (no resume)' : ''}`;
+    } else if (info && info.ok) {
+      infoSizeDisplay.value = info.kind === 'file' ? 'Unknown' : 'Stream';
+    } else {
+      infoSizeDisplay.value = `Unknown${info && info.error ? ` — ${info.error}` : ''}`;
+    }
+  }
 }
 
-if (infoModalClose) infoModalClose.addEventListener('click', () => downloadInfoModal.classList.add('hidden'));
-if (infoCancelBtn) infoCancelBtn.addEventListener('click', () => downloadInfoModal.classList.add('hidden'));
+function capitalizeCategory(cat) {
+  const c = String(cat || 'General');
+  const known = ['General', 'Compressed', 'Documents', 'Music', 'Programs', 'Video'];
+  return known.find((k) => k.toLowerCase() === c.toLowerCase()) || 'General';
+}
 
-if (infoStartBtn) {
-  infoStartBtn.addEventListener('click', async () => {
-    if (pendingDownloadUrl && window.api.add) {
-      await window.api.add({ url: pendingDownloadUrl });
-    }
-    if (downloadInfoModal) downloadInfoModal.classList.add('hidden');
+function closeDownloadInfoModal() {
+  infoProbeSeq++;
+  infoState = null;
+  if (downloadInfoModal) downloadInfoModal.classList.add('hidden');
+}
+
+// Picking a category moves the file to that category's folder, as in IDM —
+// unless the user has already typed a path of their own.
+if (infoCategorySelect) {
+  infoCategorySelect.addEventListener('change', () => {
+    if (!infoState || !infoDestInput) return;
+    const { name } = splitSavePath(infoDestInput.value);
+    infoDestInput.value = joinSavePath(categoryDir(infoCategorySelect.value), name || infoState.filename);
+  });
+}
+if (infoDestInput) {
+  infoDestInput.addEventListener('input', () => {
+    if (infoState) infoState.pathEdited = true;
   });
 }
 
-if (infoLaterBtn) {
-  infoLaterBtn.addEventListener('click', async () => {
-    if (pendingDownloadUrl && window.api.add) {
-      await window.api.add({ url: pendingDownloadUrl, startNow: false });
-    }
-    if (downloadInfoModal) downloadInfoModal.classList.add('hidden');
-  });
+async function submitDownloadInfo(startNow) {
+  if (!infoState || !window.api.add) return closeDownloadInfoModal();
+  const { dir, name } = splitSavePath(infoDestInput ? infoDestInput.value : '');
+  const payload = {
+    url: infoState.url,
+    kind: infoState.kind,
+    startNow,
+    noBatch: true,
+  };
+  if (dir) payload.destDir = dir;
+  if (name) payload.suggestedFilename = name;
+  closeDownloadInfoModal();
+  try {
+    await window.api.add(payload);
+  } catch (e) {
+    showTransientError(`Could not add the download: ${e.message}`);
+  }
 }
+
+if (infoModalClose) infoModalClose.addEventListener('click', closeDownloadInfoModal);
+if (infoCancelBtn) infoCancelBtn.addEventListener('click', closeDownloadInfoModal);
+if (infoStartBtn) infoStartBtn.addEventListener('click', () => submitDownloadInfo(true));
+if (infoLaterBtn) infoLaterBtn.addEventListener('click', () => submitDownloadInfo(false));
 
 // --- Download Complete Dialog (IDM's signature completion popup) -----------
 function fileIconKeyFor(filename) {
-  const ext = (filename || '').split('.').pop().toLowerCase();
-  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'ico'].includes(ext)) return 'image';
-  if (['zip', 'rar', '7z', 'tar', 'gz', 'iso'].includes(ext)) return 'archive';
-  if (['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'].includes(ext)) return 'doc';
-  if (['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a'].includes(ext)) return 'music';
-  if (['exe', 'msi', 'apk'].includes(ext)) return 'exe';
-  return 'film';
+  const name = String(filename || '');
+  const ext = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif', 'tif', 'tiff'].includes(ext)) return 'image';
+  if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'iso'].includes(ext)) return 'archive';
+  if (['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'csv', 'rtf', 'epub'].includes(ext)) return 'doc';
+  if (['mp3', 'wav', 'flac', 'aac', 'ogg', 'opus', 'm4a', 'wma'].includes(ext)) return 'music';
+  if (['exe', 'msi', 'apk', 'dmg', 'appx', 'msix'].includes(ext)) return 'exe';
+  if (['mp4', 'mkv', 'avi', 'mov', 'webm', 'ts', 'm2ts', 'flv', 'wmv', 'm4v', '3gp', 'mpg', 'mpeg', 'ogv', 'm3u8', 'mpd'].includes(ext)) return 'film';
+  return 'file';
 }
 
 function showDownloadCompleteDialog(item) {
@@ -710,8 +927,8 @@ function showPropertiesModal(item) {
         ? formatBytes(item.progress.downloaded)
         : '—';
 
-  set('prop-filename', item.filename || item.url);
-  set('prop-status', item.status);
+  set('prop-filename', displayNameOf(item));
+  set('prop-status', item.error ? `${statusLabel(item)} — ${item.error}` : statusLabel(item));
   set('prop-size', formatBytes(item.size));
   set('prop-downloaded', downloaded);
   set('prop-category', categoryOf(item));
@@ -819,6 +1036,7 @@ async function openOptions() {
       setChecked('cfg-int-brave', integ.brave);
       setChecked('cfg-int-firefox', integ.firefox);
       setChecked('cfg-show-complete', cfg.showCompleteDialog !== false);
+      setChecked('cfg-show-start', cfg.showStartDialog !== false);
       setVal('cfg-duplicate-action', cfg.duplicateAction || 'ask');
 
       // Connection
@@ -967,6 +1185,7 @@ async function saveOptions() {
         firefox: getChecked('cfg-int-firefox'),
       },
       showCompleteDialog: getChecked('cfg-show-complete'),
+      showStartDialog: getChecked('cfg-show-start'),
       duplicateAction: getVal('cfg-duplicate-action') || 'ask',
       connectionType: getVal('cfg-conn-type'),
       maxConnections: parseInt(getVal('cfg-max-conn'), 10) || 8,
@@ -1082,13 +1301,18 @@ document.getElementById('ctx-delete-disk')?.addEventListener('click', () => {
   confirmDelete(Array.from(selectedIds), true);
 });
 
-document.getElementById('ctx-redownload')?.addEventListener('click', () => {
-  const id = Array.from(selectedIds)[0];
-  const item = items.get(id);
-  if (item && item.url && window.api.add) {
-    window.api.add({ url: item.url });
+// Redownload restarts the SAME entry — same headers/cookies, quality and file —
+// rather than re-adding the bare URL, which lost the captured cookies (403 on
+// anything that needed a login) and tripped the duplicate prompt on itself.
+function redownloadSelection() {
+  for (const id of selectedIds) {
+    const item = items.get(id);
+    if (!item) continue;
+    if (window.api.redownload) window.api.redownload(id);
+    else if (item.url && window.api.add) window.api.add({ url: item.url });
   }
-});
+}
+document.getElementById('ctx-redownload')?.addEventListener('click', redownloadSelection);
 
 document.getElementById('ctx-properties')?.addEventListener('click', () => {
   showPropertiesModal(items.get(Array.from(selectedIds)[0]));
@@ -1115,8 +1339,11 @@ document.getElementById('dd-import')?.addEventListener('click', async () => {
   }
 });
 
+// Exit means exit. window.close() only hid the window to the tray (that's what
+// the close button is for), so the menu item never actually quit.
 document.getElementById('dd-exit')?.addEventListener('click', () => {
-  window.close();
+  if (window.api.quit) window.api.quit();
+  else window.close();
 });
 
 // File Menu
@@ -1148,13 +1375,7 @@ document.getElementById('dd-refresh-url')?.addEventListener('click', () => {
   }
 });
 
-document.getElementById('dd-redownload')?.addEventListener('click', () => {
-  const id = Array.from(selectedIds)[0];
-  const item = items.get(id);
-  if (item && item.url && window.api.add) {
-    window.api.add({ url: item.url });
-  }
-});
+document.getElementById('dd-redownload')?.addEventListener('click', redownloadSelection);
 
 document.getElementById('dd-delete')?.addEventListener('click', () => {
   confirmDelete(Array.from(selectedIds), false);
@@ -1887,8 +2108,9 @@ if (infoBrowseBtn) {
     if (window.api.pickDestDir) {
       const dir = await window.api.pickDestDir();
       if (dir && infoDestInput) {
-        const filename = infoDestInput.value.split('\\').pop().split('/').pop();
-        infoDestInput.value = dir + '\\' + filename;
+        const { name } = splitSavePath(infoDestInput.value);
+        infoDestInput.value = joinSavePath(dir, name || (infoState && infoState.filename) || 'download');
+        if (infoState) infoState.pathEdited = true;
       }
     }
   });
@@ -2287,7 +2509,7 @@ function renderProgressModal(item) {
   };
 
   const p = item.progress || {};
-  set('prog-filename', item.filename || item.url || '—');
+  set('prog-filename', displayNameOf(item) || '—');
   set('prog-status', item.error ? `Error — ${item.error}` : statusLabel(item));
   set('prog-size', formatBytes(item.size));
   set('prog-downloaded', formatBytes(p.downloaded));
@@ -2626,6 +2848,7 @@ let _initialized = false;
 function init() {
   if (_initialized) return; // guard against DOMContentLoaded + fallback double-call
   _initialized = true;
+  ensureSharedIconDefs();
   injectIcons();
   initColumnResizing();
   initColumnSorting();

@@ -17,23 +17,58 @@ try {
 let ws = null;
 let nativeReady = false;
 let reconnectDelay = 1000;
+let keepAliveTimer = null;
+
+// Chrome ends an idle MV3 service worker after ~30s, taking this socket with
+// it; the next download then races a cold start and goes to the browser
+// instead of the app. Traffic on an open WebSocket counts as activity (Chrome
+// 116+), so a small ping every 20s keeps the worker — and the connection —
+// alive for as long as the app is running.
+const KEEPALIVE_MS = 20000;
+
+function startKeepAlive(socket) {
+  stopKeepAlive();
+  const tick = () => {
+    if (ws !== socket || socket.readyState !== WebSocket.OPEN) return;
+    try {
+      socket.send(JSON.stringify({ type: 'ping' }));
+    } catch (e) {}
+    keepAliveTimer = setTimeout(tick, KEEPALIVE_MS);
+  };
+  keepAliveTimer = setTimeout(tick, KEEPALIVE_MS);
+}
+
+function stopKeepAlive() {
+  if (keepAliveTimer) clearTimeout(keepAliveTimer);
+  keepAliveTimer = null;
+}
 
 function connectBridge() {
   if (ws) {
     try { ws.close(); } catch (e) {}
   }
 
-  ws = new WebSocket('ws://127.0.0.1:9333');
+  const socket = new WebSocket('ws://127.0.0.1:9333');
+  ws = socket;
 
   ws.onopen = () => {
     try {
-      ws.send(JSON.stringify({ type: 'hello' }));
+      socket.send(JSON.stringify({ type: 'hello' }));
     } catch (e) {}
+    startKeepAlive(socket);
   };
 
   ws.onmessage = (event) => {
     let msg;
     try { msg = JSON.parse(event.data); } catch (e) { return; }
+
+    // The app pushes this whenever its settings change, so an edited File
+    // Types or exclusion list applies to the very next download rather than
+    // after the next reconnect.
+    if (msg.type === 'config' && msg.config && typeof msg.config === 'object') {
+      self.serverConfig = msg.config;
+      return;
+    }
 
     if (msg.type === 'hello-ack' || msg.status === 'success' || msg.type === 'queue') {
       const wasReady = nativeReady;
@@ -48,8 +83,11 @@ function connectBridge() {
   };
 
   ws.onclose = () => {
+    // A superseded socket closing must not tear down its replacement.
+    if (ws !== socket) return;
     const wasReady = nativeReady;
     nativeReady = false;
+    stopKeepAlive();
     ws = null;
     chrome.action.setBadgeText({ text: '!' });
     chrome.action.setBadgeBackgroundColor({ color: '#e5534b' });
@@ -102,17 +140,245 @@ self.shouldExclude = function(urlStr) {
 
 // --- Cookie/header & Title helpers -------------------------------------------
 
-async function buildHeaders(pageUrl, referer) {
+/**
+ * The headers the browser itself would send when fetching `targetUrl` from a
+ * page at `referer`. Cookies are looked up for the URL being DOWNLOADED — the
+ * same scoping the browser applies. This used to take the PAGE's cookies, so
+ * clicking a video on site A sent A's whole session to whatever CDN hosted the
+ * file, while the CDN's own cookies (the ones it actually needed) were missing.
+ */
+async function buildHeaders(targetUrl, referer) {
   const headers = {};
   try {
-    const cookies = await chrome.cookies.getAll({ url: pageUrl });
+    const cookies = await chrome.cookies.getAll({ url: targetUrl });
     if (cookies.length) {
       headers.Cookie = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
     }
   } catch {}
-  if (referer) headers.Referer = referer;
+  if (referer && /^https?:/i.test(referer)) headers.Referer = referer;
   headers['User-Agent'] = navigator.userAgent;
   return headers;
+}
+
+// Only these can be fetched again by the app. blob:/data:/filesystem: URLs
+// exist only inside the page that made them (a "Save as CSV" button, a canvas
+// export); taking one away from the browser just lost the download.
+function isTransferableUrl(url) {
+  return /^(https?|ftp):\/\//i.test(String(url || ''));
+}
+
+// Downloads produced by a POST (a form submission, a "generate report"
+// button) cannot be replayed as the plain GET the app would issue — handing
+// one over produced an error page or an empty file. Remember recent non-GET
+// navigations briefly so the download they produce stays with the browser.
+const NON_GET_TTL_MS = 60000;
+const recentNonGet = new Map(); // url -> timestamp
+
+function rememberNonGet(url) {
+  const now = Date.now();
+  recentNonGet.set(url, now);
+  if (recentNonGet.size > 200) {
+    for (const [u, at] of recentNonGet) {
+      if (now - at > NON_GET_TTL_MS) recentNonGet.delete(u);
+    }
+  }
+}
+
+function wasNonGet(...urls) {
+  const now = Date.now();
+  return urls.some((u) => u && recentNonGet.has(u) && now - recentNonGet.get(u) < NON_GET_TTL_MS);
+}
+
+// --- File types (the app's Options → File Types) -----------------------------
+// IDM only takes over downloads whose type is on this list; everything else
+// stays with the browser. The extension used to take EVERY download, so a
+// .docx, an .ics invite or a .json export all vanished into the app.
+
+// A URL's "extension" that says nothing about the file it serves:
+// /download.php?id=7 is very often a .zip.
+const SCRIPT_EXTENSIONS = /^(php\d?|aspx?|ashx|jspx?|cgi|pl|py|rb|do|action|cfm|s?html?|xhtml|axd)$/;
+
+// Content types that name a real file type. Generic ones (octet-stream,
+// force-download) are deliberately absent: they identify nothing.
+const MIME_EXTENSIONS = {
+  'application/zip': 'zip',
+  'application/x-zip-compressed': 'zip',
+  'application/x-7z-compressed': '7z',
+  'application/x-rar-compressed': 'rar',
+  'application/vnd.rar': 'rar',
+  'application/gzip': 'gz',
+  'application/x-gzip': 'gz',
+  'application/x-tar': 'tar',
+  'application/x-bzip2': 'bz2',
+  'application/x-iso9660-image': 'iso',
+  'application/pdf': 'pdf',
+  'application/x-msdownload': 'exe',
+  'application/x-msdos-program': 'exe',
+  'application/vnd.microsoft.portable-executable': 'exe',
+  'application/x-msi': 'msi',
+  'application/x-ms-installer': 'msi',
+  'application/vnd.android.package-archive': 'apk',
+  'application/vnd.ms-powerpoint': 'ppt',
+  'application/x-mpegurl': 'm3u8',
+  'application/vnd.apple.mpegurl': 'm3u8',
+  'application/dash+xml': 'mpd',
+  'video/mp4': 'mp4',
+  'video/x-matroska': 'mkv',
+  'video/webm': 'webm',
+  'video/quicktime': 'mov',
+  'video/x-msvideo': 'avi',
+  'video/x-flv': 'flv',
+  'video/x-ms-wmv': 'wmv',
+  'video/mpeg': 'mpeg',
+  'video/mp2t': 'ts',
+  'video/3gpp': '3gp',
+  'video/ogg': 'ogv',
+  'audio/mpeg': 'mp3',
+  'audio/mp4': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'audio/aac': 'aac',
+  'audio/ogg': 'ogg',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/x-ms-wma': 'wma',
+  'image/tiff': 'tif',
+};
+
+function baseName(p) {
+  return String(p || '').split(/[\\/]/).pop();
+}
+
+function extensionOfName(name) {
+  const base = baseName(name);
+  const dot = base.lastIndexOf('.');
+  if (dot <= 0 || dot === base.length - 1) return '';
+  const ext = base.slice(dot + 1).toLowerCase();
+  return /^[a-z0-9]{1,10}$/.test(ext) ? ext : '';
+}
+
+function extensionOfUrl(url) {
+  try {
+    const last = new URL(url).pathname.split('/').pop() || '';
+    let name = last;
+    try {
+      name = decodeURIComponent(last);
+    } catch (e) {
+      /* keep the raw segment */
+    }
+    const ext = extensionOfName(name);
+    return ext && !SCRIPT_EXTENSIONS.test(ext) ? ext : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+let fileTypeMatcherCache = { source: undefined, match: null };
+
+/**
+ * A predicate for the app's File Types list, or null when the app hasn't sent
+ * one (an older build) — in which case everything is captured, as before.
+ * Entries are space/comma separated, case-insensitive, may be written as
+ * "ZIP", ".zip" or "*.zip", and may use wildcards ("R0*" = split RAR parts).
+ * An empty list captures nothing automatically; the Force key still works.
+ */
+function fileTypeMatcher() {
+  const source = self.serverConfig ? self.serverConfig.fileTypes : undefined;
+  if (typeof source !== 'string') return null;
+  if (fileTypeMatcherCache.source === source) return fileTypeMatcherCache.match;
+  const exact = new Set();
+  const globs = [];
+  for (const raw of source.split(/[\s,;]+/)) {
+    const token = raw.trim().toLowerCase().replace(/^\*?\./, '');
+    if (!token) continue;
+    if (/[*?]/.test(token)) {
+      const escaped = token.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+      globs.push(new RegExp(`^${escaped}$`));
+    } else {
+      exact.add(token);
+    }
+  }
+  const match = (ext) => Boolean(ext) && (exact.has(ext) || globs.some((re) => re.test(ext)));
+  match.count = exact.size + globs.length;
+  fileTypeMatcherCache = { source, match };
+  return match;
+}
+
+/** A plain-language line for the popup: what automatic capture will take. */
+function fileTypeSummary() {
+  const match = fileTypeMatcher();
+  if (!match) return 'Capturing every download.';
+  if (!match.count) return 'Automatic capture is off (the app\'s File Types list is empty).';
+  return `Capturing ${match.count} file type${match.count === 1 ? '' : 's'} from the app's File Types list; other files stay with the browser.`;
+}
+
+/**
+ * What a new download is, from what's known the moment it starts: the name
+ * the browser settled on, the final URL, the Content-Type. `ext` is '' when
+ * none of those say anything useful.
+ */
+function knownTypeOf(item) {
+  const name = baseName(item.filename);
+  const fromName = extensionOfName(name);
+  if (fromName) return { ext: fromName, filename: name };
+  const fromUrl = extensionOfUrl(item.finalUrl) || extensionOfUrl(item.url);
+  if (fromUrl) return { ext: fromUrl, filename: null };
+  const mime = String(item.mime || '').toLowerCase().split(';')[0].trim();
+  if (MIME_EXTENSIONS[mime]) return { ext: MIME_EXTENSIONS[mime], filename: null };
+  return { ext: '', filename: null };
+}
+
+// How long to wait for the browser to name a download whose type can't be
+// told from its URL or Content-Type. The browser only knows once it has read
+// Content-Disposition — or once the user has answered its "Save as" dialog, in
+// which case the download is the user's to handle there, and we let it be.
+const FILENAME_WAIT_MS = 4000;
+
+function waitForFilename(id, timeoutMs = FILENAME_WAIT_MS) {
+  return new Promise((resolve) => {
+    const downloads = chrome.downloads;
+    if (!downloads || !downloads.onChanged || typeof downloads.onChanged.addListener !== 'function') {
+      resolve('');
+      return;
+    }
+    let done = false;
+    let timer = null;
+    function onChanged(delta) {
+      if (delta && delta.id === id && delta.filename && delta.filename.current) finish(delta.filename.current);
+    }
+    function finish(name) {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      try {
+        downloads.onChanged.removeListener(onChanged);
+      } catch (e) {}
+      resolve(name || '');
+    }
+    downloads.onChanged.addListener(onChanged);
+    timer = setTimeout(() => finish(''), timeoutMs);
+    // It may already have been named between onCreated and now.
+    try {
+      const found = downloads.search({ id }, (results) => {
+        if (results && results[0] && results[0].filename) finish(results[0].filename);
+      });
+      if (found && typeof found.then === 'function') {
+        found.then((results) => {
+          if (results && results[0] && results[0].filename) finish(results[0].filename);
+        }).catch(() => {});
+      }
+    } catch (e) {}
+  });
+}
+
+/** { capture, filename } — should this browser download go to the app? */
+async function fileTypeVerdict(item) {
+  const match = fileTypeMatcher();
+  const known = knownTypeOf(item);
+  if (!match) return { capture: true, ext: known.ext, filename: known.filename };
+  if (known.ext) return { capture: match(known.ext), ext: known.ext, filename: known.filename };
+  const name = baseName(await waitForFilename(item.id));
+  const ext = extensionOfName(name);
+  return { capture: Boolean(ext) && match(ext), ext, filename: name || null };
 }
 
 function cleanMediaTitle(msgTitle, tabTitle, mediaUrl, isHls) {
@@ -156,7 +422,18 @@ function parseAttributes(line) {
   return attrs;
 }
 
+/**
+ * Variants in EXACTLY the order the app's core/hls.js uses — bandwidth,
+ * highest first (a stable sort, so ties keep playlist order on both sides).
+ * The app receives only `variantIndex`; listing them here in playlist order
+ * meant that for the many masters written lowest-quality-first, picking
+ * "360p" in the panel downloaded 1080p and vice versa.
+ */
 function parseMasterVariants(text, baseUrl) {
+  return parseMasterVariantsInPlaylistOrder(text, baseUrl).sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0));
+}
+
+function parseMasterVariantsInPlaylistOrder(text, baseUrl) {
   const lines = text.split(/\r?\n/);
   const variants = [];
   for (let i = 0; i < lines.length; i++) {
@@ -577,6 +854,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
+    if (details.method && details.method !== 'GET' && (details.type === 'main_frame' || details.type === 'sub_frame')) {
+      rememberNonGet(details.url);
+    }
     if (details.tabId < 0) return;
     if (self.shouldExclude && self.shouldExclude(details.url, details.type, details.initiator)) return;
     // A page navigation is a page, not a download candidate — some sites route
@@ -682,6 +962,9 @@ chrome.downloads.onCreated.addListener(async (item) => {
     return;
   }
   if (!nativeReady) return;
+  // Things the app could never fetch stay with the browser, whatever the keys.
+  if (!isTransferableUrl(item.url)) return;
+  if (wasNonGet(item.url, item.finalUrl)) return;
 
   const hint = currentCaptureHint();
   // Bypass wins over force: it's the "just let the browser do it" escape hatch,
@@ -696,19 +979,40 @@ chrome.downloads.onCreated.addListener(async (item) => {
   // key on a site the user has otherwise told us to leave alone.
   if (!hint.force && self.shouldExclude && self.shouldExclude(item.url)) return;
 
+  // Only the types on the app's File Types list are taken automatically —
+  // Force takes anything, like IDM's "force download with IDM" key.
+  let verdict;
+  if (hint.force) {
+    const known = knownTypeOf(item);
+    verdict = { capture: true, ext: known.ext, filename: known.filename };
+  } else {
+    verdict = await fileTypeVerdict(item);
+    if (!verdict.capture) return;
+    // The wait for a filename can outlast the connection to the app; if so
+    // the browser simply keeps the download it already has.
+    if (!nativeReady) return;
+  }
+
   chrome.downloads.cancel(item.id, () => {
     chrome.downloads.erase({ id: item.id });
   });
 
   const headers = await buildHeaders(item.url, item.referrer || '');
-  const sent = sendToBridge({
-    type: 'add-download',
-    payload: { url: item.url, kind: 'file', headers },
-  });
+  const payload = {
+    url: item.url,
+    kind: verdict.ext === 'm3u8' ? 'hls' : verdict.ext === 'mpd' ? 'dash' : 'file',
+    headers,
+  };
+  // The name the browser settled on (from Content-Disposition) is the one the
+  // user would have got; the app uses it rather than guessing again.
+  if (verdict.filename) payload.suggestedFilename = verdict.filename;
+  const sent = sendToBridge({ type: 'add-download', payload });
 
   if (!sent) {
     recentlyForwarded.add(item.url);
-    chrome.downloads.download({ url: item.url, filename: item.filename });
+    // No filename: once determined it's an absolute path, which download()
+    // rejects. The browser names it the same way again by itself.
+    chrome.downloads.download({ url: item.url });
   }
 });
 
@@ -1051,6 +1355,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         items: snapshot.items,
         subtitles: snapshot.subtitles,
         bridgeConnected: nativeReady,
+        captureSummary: nativeReady ? fileTypeSummary() : null,
       });
     })();
     return true;
@@ -1103,7 +1408,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'download-media') {
     (async () => {
-      const headers = await buildHeaders(sender.tab?.url || msg.url, sender.tab?.url || '');
+      if (!isTransferableUrl(msg.url)) {
+        sendResponse({ sent: false });
+        return;
+      }
+      const headers = await buildHeaders(msg.url, sender.tab?.url || '');
       const suggestedFilename = cleanMediaTitle(msg.title, sender.tab?.title, msg.url, msg.kind === 'hls');
       const sent = sendToBridge({
         type: 'add-download',
@@ -1123,26 +1432,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // --- Context Menu Integration (Download with Downloader) ------------------
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: 'ddl-download-context',
-    title: 'Download with Downloader',
-    contexts: ['video', 'audio', 'link', 'selection', 'image', 'page'],
-  });
+  // onInstalled also fires on every update, when the item already exists —
+  // create() with a duplicate id fails, so start from a clean slate.
+  const create = () =>
+    chrome.contextMenus.create({
+      id: 'ddl-download-context',
+      title: 'Download with Downloader',
+      contexts: ['video', 'audio', 'link', 'selection', 'image', 'page'],
+    });
+  if (typeof chrome.contextMenus.removeAll === 'function') chrome.contextMenus.removeAll(create);
+  else create();
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  const mediaUrl = info.srcUrl || info.linkUrl || info.selectionText || info.pageUrl;
-  if (!mediaUrl || !mediaUrl.startsWith('http')) return;
+  const mediaUrl = String(info.srcUrl || info.linkUrl || info.selectionText || info.pageUrl || '').trim();
+  if (!isTransferableUrl(mediaUrl)) return;
 
-  const headers = await buildHeaders(tab?.url || mediaUrl, tab?.url || '');
-  const isHls = mediaUrl.includes('.m3u8');
-  const suggestedFilename = cleanMediaTitle('', tab?.title, mediaUrl, isHls);
+  const headers = await buildHeaders(mediaUrl, tab?.url || '');
+  const kind = /\.m3u8(\?|#|$)/i.test(mediaUrl) ? 'hls' : /\.mpd(\?|#|$)/i.test(mediaUrl) ? 'dash' : 'file';
+  const suggestedFilename = cleanMediaTitle('', tab?.title, mediaUrl, kind !== 'file');
 
   sendToBridge({
     type: 'add-download',
     payload: {
       url: mediaUrl,
-      kind: isHls ? 'hls' : 'file',
+      kind,
       headers,
       suggestedFilename,
     },

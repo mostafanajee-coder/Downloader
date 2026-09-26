@@ -105,9 +105,15 @@ function baseUrlOf(node) {
 
 // --- segment planning per representation --------------------------------------
 
+// A SegmentTimeline can't sensibly expand past this; anything bigger is a
+// broken or hostile manifest, not a real video.
+const MAX_SEGMENTS_PER_TRACK = 200000;
+
 function buildFromTemplate(tpl, rep, baseUrl, durationSec) {
-  const timescale = Number(tpl.attrs.timescale || 1);
-  const startNumber = Number(tpl.attrs.startNumber || 1);
+  const timescale = Number(tpl.attrs.timescale || 1) || 1;
+  const startNumber = Number(tpl.attrs.startNumber != null ? tpl.attrs.startNumber : 1);
+  const endNumber = tpl.attrs.endNumber != null ? Number(tpl.attrs.endNumber) : null;
+  const pto = Number(tpl.attrs.presentationTimeOffset || 0);
   const media = tpl.attrs.media;
   const initTpl = tpl.attrs.initialization;
 
@@ -116,27 +122,40 @@ function buildFromTemplate(tpl, rep, baseUrl, durationSec) {
 
   const segments = [];
   const timeline = find(tpl, 'SegmentTimeline');
+  const withinEnd = (number) => endNumber == null || number <= endNumber;
 
   if (timeline) {
     let number = startNumber;
     let time = 0;
-    let first = true;
-    for (const s of findAll(timeline, 'S')) {
+    // Where the period ends on the timeline's own clock, for r="-1".
+    const periodEnd = durationSec > 0 ? pto + durationSec * timescale : null;
+    const entries = findAll(timeline, 'S');
+    for (let si = 0; si < entries.length; si++) {
+      const s = entries[si];
       const d = Number(s.attrs.d);
+      if (!(d > 0)) continue;
       if (s.attrs.t != null) time = Number(s.attrs.t);
-      else if (first && s.attrs.t == null) time = 0;
-      const repeat = Number(s.attrs.r || 0); // r = additional repeats
-      for (let i = 0; i <= repeat; i++) {
+      let repeat = Number(s.attrs.r || 0); // r = additional repeats
+      if (repeat < 0) {
+        // r="-1": repeat until the next S@t, or failing that the end of the
+        // period. Read as "no repeats", it dropped all but the first segment
+        // and produced a video a few seconds long.
+        const next = entries[si + 1];
+        const until = next && next.attrs.t != null ? Number(next.attrs.t) : periodEnd;
+        repeat = until != null && until > time ? Math.ceil((until - time) / d) - 1 : 0;
+      }
+      for (let i = 0; i <= repeat && withinEnd(number) && segments.length < MAX_SEGMENTS_PER_TRACK; i++) {
         const url = new URL(fillTemplate(media, { ...vars, Number: number, Time: time }), baseUrl).toString();
         segments.push({ url });
         number++;
         time += d;
       }
-      first = false;
     }
   } else if (tpl.attrs.duration) {
     const segDur = Number(tpl.attrs.duration) / timescale;
-    const count = segDur > 0 && durationSec > 0 ? Math.ceil(durationSec / segDur) : 0;
+    let count = segDur > 0 && durationSec > 0 ? Math.ceil(durationSec / segDur - 1e-9) : 0;
+    if (endNumber != null) count = Math.min(count, Math.max(0, endNumber - startNumber + 1));
+    count = Math.min(count, MAX_SEGMENTS_PER_TRACK);
     for (let i = 0; i < count; i++) {
       const number = startNumber + i;
       const time = i * Number(tpl.attrs.duration);
@@ -215,8 +234,34 @@ function parseMpd(xml, manifestUrl) {
   const drmSystems = collectDrm(mpd);
   const drm = drmSystems.length ? drmSystems.join(', ') : null;
 
-  const period = find(mpd, 'Period');
-  if (!period) throw new Error('MPD has no Period');
+  const periodNodes = findAll(mpd, 'Period');
+  if (!periodNodes.length) throw new Error('MPD has no Period');
+
+  // Each Period is its own chunk of the timeline (chapters, stitched ads,
+  // programme boundaries) with its own representations and init segments.
+  // Only the first used to be read, so a multi-period VOD downloaded as its
+  // opening few minutes and was reported complete.
+  const periods = [];
+  let elapsed = 0;
+  periodNodes.forEach((period, i) => {
+    const start = period.attrs.start != null ? parseDuration(period.attrs.start) : elapsed;
+    let dur = parseDuration(period.attrs.duration);
+    if (!dur) {
+      const next = periodNodes[i + 1];
+      const nextStart = next && next.attrs.start != null ? parseDuration(next.attrs.start) : null;
+      dur = nextStart != null ? Math.max(0, nextStart - start) : Math.max(0, durationSec - start);
+    }
+    elapsed = start + dur;
+    periods.push({ index: i, id: period.attrs.id || String(i), start, durationSec: dur, ...parsePeriod(period, mpdBase, dur) });
+  });
+
+  // The first period stays the top-level answer: the extension lists its
+  // qualities, and variantIndex is a position in that list.
+  const first = periods[0];
+  return { durationSec, video: first.video, audio: first.audio, periods, live, drm, drmSystems };
+}
+
+function parsePeriod(period, mpdBase, periodDurationSec) {
   const periodBase = resolveBase(mpdBase, [baseUrlOf(period)]);
 
   const video = [];
@@ -243,7 +288,7 @@ function parseMpd(xml, manifestUrl) {
     }
 
     for (const repNode of reps) {
-      const rep = buildRepresentation(repNode, inherited, setBase, durationSec);
+      const rep = buildRepresentation(repNode, inherited, setBase, periodDurationSec);
       if (contentType === 'video') video.push(rep);
       else if (contentType === 'audio') audio.push(rep);
       else if (rep.height || (rep.mimeType || '').startsWith('video/')) video.push(rep);
@@ -254,7 +299,7 @@ function parseMpd(xml, manifestUrl) {
   video.sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bandwidth || 0) - (a.bandwidth || 0));
   audio.sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0));
 
-  return { durationSec, video, audio, live, drm, drmSystems };
+  return { video, audio };
 }
 
 const DRM_SCHEMES = {
@@ -283,4 +328,28 @@ function selectTracks(parsed, variantIndex = 0) {
   return { video, audio };
 }
 
-module.exports = { parseMpd, selectTracks, parseXml, fillTemplate, parseDuration };
+/**
+ * The same choice made for every period. `variantIndex` names a rendition in
+ * the FIRST period's list; later periods (an ad break, the next chapter) have
+ * their own lists, so each picks the closest match — same height if there is
+ * one, otherwise the nearest bandwidth.
+ */
+function selectTracksPerPeriod(parsed, variantIndex = 0) {
+  const periods = parsed.periods && parsed.periods.length ? parsed.periods : [parsed];
+  const chosen = selectTracks(periods[0], variantIndex).video;
+  return periods.map((p, i) => {
+    if (i === 0) return { period: p, ...selectTracks(p, variantIndex) };
+    let video = null;
+    if (chosen) {
+      video = p.video.find((v) => v.height && v.height === chosen.height) || null;
+      if (!video && p.video.length) {
+        video = p.video.reduce((best, v) =>
+          Math.abs((v.bandwidth || 0) - (chosen.bandwidth || 0)) < Math.abs((best.bandwidth || 0) - (chosen.bandwidth || 0)) ? v : best
+        );
+      }
+    }
+    return { period: p, video: video || p.video[0] || null, audio: p.audio[0] || null };
+  });
+}
+
+module.exports = { parseMpd, selectTracks, selectTracksPerPeriod, parseXml, fillTemplate, parseDuration };

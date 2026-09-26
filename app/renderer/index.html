@@ -2,6 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <!-- Only this app's own files may run here. Filenames, URLs and page titles
+       from the web are rendered into this document; the policy is the backstop
+       if one ever slips past escaping. Inline style attributes are used by the
+       markup, so style-src allows them — scripts get no such allowance. -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; media-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'" />
   <title>Internet Download Manager 6.43</title>
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -593,6 +599,7 @@
           </div>
           <div class="opt-group">
             <div class="opt-group-title">Notifications</div>
+            <label class="opt-check"><input type="checkbox" id="cfg-show-start" /> Show the "Download File Info" dialog before a download starts</label>
             <label class="opt-check"><input type="checkbox" id="cfg-show-complete" /> Show the "Download Complete" dialog when a file finishes</label>
             <div class="opt-hint">If unchecked via the dialog's own "Don't show again", re-enable it here.</div>
           </div>
@@ -729,7 +736,7 @@
           <div class="opt-group">
             <div class="opt-group-title">Automatically start downloading these file types</div>
             <textarea id="cfg-file-types" class="opt-input opt-textarea" spellcheck="false"></textarea>
-            <div class="opt-hint">Space-separated extensions (e.g. MP4 MKV ZIP PDF). Wildcards like R0* allowed.</div>
+            <div class="opt-hint">Space-separated extensions (e.g. MP4 MKV ZIP PDF). Wildcards like R0* allowed. The browser extension only takes over downloads of these types — everything else stays with the browser. Hold the Force key while clicking to send any file here anyway.</div>
           </div>
           <div class="opt-group">
             <div class="opt-group-title">Do not automatically capture downloads from these sites</div>

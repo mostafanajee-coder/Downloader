@@ -10,14 +10,60 @@ const { DownloadTask } = require('./DownloadTask');
 const { HlsDownloadTask } = require('./hlsDownloadTask');
 const { DashDownloadTask } = require('./dashDownloadTask');
 const { expandBatchUrl } = require('./BatchDownloader');
-const { sanitizeFilename } = require('./filename');
+const { sanitizeFilename, numberedVariant } = require('./filename');
 const { getCategoryForUrl } = require('./categories');
 const { RateLimiter } = require('./rateLimiter');
 const { configureHttp, configureProxy } = require('./httpUtils');
 const { discardWorkspace } = require('./workspace');
 const { applySiteLogin } = require('./siteLogins');
+const { probe } = require('./probe');
+const { sanitizeRequestHeaders } = require('./headerScope');
 
 const MAX_CONCURRENT_DOWNLOADS = 4;
+const KINDS = new Set(['file', 'hls', 'dash']);
+
+// Paths compare case-insensitively on Windows: "Video.mp4" and "video.mp4"
+// are the same file there.
+function samePathKey(p) {
+  const resolved = path.resolve(p);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+/** What a download is called before its server has named it. */
+function nameFromUrl(urlStr) {
+  try {
+    const base = path.posix.basename(new URL(urlStr).pathname);
+    if (!base) return null;
+    try {
+      return decodeURIComponent(base);
+    } catch (e) {
+      return base;
+    }
+  } catch (e) {
+    return null;
+  }
+}
+
+/** HLS/DASH are remuxed into MP4 whatever the playlist was called. */
+function streamOutputName(name) {
+  const base = String(name || '').replace(/\.(m3u8|m3u|mpd|ts|m4s|mp4|m4v)$/i, '');
+  return `${base || 'video'}.mp4`;
+}
+
+// Only ever raced against real work as an upper bound, so it must not keep the
+// process alive on its own.
+function sleep(ms) {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    if (t && typeof t.unref === 'function') t.unref();
+  });
+}
+
+/** An IDM-style exclusion pattern ("*.example.com") as an anchored regex. */
+function hostPatternToRegExp(pattern) {
+  const escaped = String(pattern).replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`, 'i');
+}
 
 // Stable ids for the two queues IDM always has. Fixed rather than generated so
 // they survive restarts and can be referenced directly by the UI.
@@ -80,10 +126,16 @@ class Manager extends EventEmitter {
     // recorded download intact instead of forcing a schema reset.
     this._ensureColumn('downloads', 'queueId', 'TEXT');
     this._ensureColumn('downloads', 'position', 'INTEGER');
+    // Not persisted originally, so a download that hadn't started yet came
+    // back after a restart without its name (an HLS stream was saved as
+    // "<uuid>.mp4") and every finished one lost its completion time.
+    this._ensureColumn('downloads', 'suggestedFilename', 'TEXT');
+    this._ensureColumn('downloads', 'startedAt', 'INTEGER');
+    this._ensureColumn('downloads', 'completedAt', 'INTEGER');
 
     this.insertStmt = this.db.prepare(`
-      INSERT OR REPLACE INTO downloads (id, kind, url, destPath, destDir, headers, connections, variantIndex, status, filename, error, addedAt, progress, queueId, position)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO downloads (id, kind, url, destPath, destDir, headers, connections, variantIndex, status, filename, error, addedAt, progress, queueId, position, suggestedFilename, startedAt, completedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     this.deleteStmt = this.db.prepare(`DELETE FROM downloads WHERE id = ?`);
     this.insertQueueStmt = this.db.prepare(`
@@ -342,13 +394,11 @@ class Manager extends EventEmitter {
     let hostname;
     try { hostname = new URL(urlStr).hostname; } catch { return false; }
     
+    // Every regex metacharacter is escaped, not just dots: an entry like
+    // "c++.example" used to throw a SyntaxError out of add() and take the
+    // whole batch down with it.
     const patterns = excludedStr.split(/\s+/).filter(Boolean);
-    for (const pattern of patterns) {
-      const regexStr = '^' + pattern.replace(/\./g, '\\.').replace(/\*/g, '.*') + '$';
-      const regex = new RegExp(regexStr, 'i');
-      if (regex.test(hostname)) return true;
-    }
-    return false;
+    return patterns.some((pattern) => hostPatternToRegExp(pattern).test(hostname));
   }
 
   /**
@@ -399,23 +449,29 @@ class Manager extends EventEmitter {
   add(payload = {}) {
     const {
       url,
-      kind = 'file',
+      kind: requestedKind = 'file',
       destPath,
       destDir,
-      headers = {},
+      headers: requestedHeaders = {},
       connections,
-      variantIndex = 0,
+      variantIndex: requestedVariant = 0,
       suggestedFilename,
       startNow = true,
       padWidth,
       allowDuplicate = false,
       queueId,
+      noBatch = false,
     } = payload;
+
+    if (typeof url !== 'string' || !url.trim()) return [];
+    const kind = KINDS.has(requestedKind) ? requestedKind : 'file';
+    const headers = sanitizeRequestHeaders(requestedHeaders);
+    const variantIndex = Number.isInteger(Number(requestedVariant)) && Number(requestedVariant) >= 0 ? Number(requestedVariant) : 0;
 
     const targetQueue = this.queues.has(queueId) ? queueId : MAIN_QUEUE_ID;
     let nextPosition = this._nextPosition(targetQueue);
 
-    const urls = expandBatchUrl(url, { padWidth });
+    const urls = noBatch ? [url.trim()] : expandBatchUrl(url.trim(), { padWidth });
     const addedIds = [];
     // 'ask' | 'skip' | 'allow' — what to do when the same URL is already here.
     const duplicatePolicy = this.config ? this.config.get('duplicateAction') || 'ask' : 'allow';
@@ -558,17 +614,87 @@ class Manager extends EventEmitter {
   remove(id) {
     const item = this.items.get(id);
     if (!item) return;
-    if (item.task) item.task.cancel();
-    // Deleting a half-finished download must also drop its scratch area,
-    // otherwise abandoned partials accumulate in the temp folder forever with
-    // nothing left in the queue pointing at them.
-    if (item.destPath) discardWorkspace({ destPath: item.destPath, tempDir: this._tempDir() });
+    // Deleting a half-finished download must also drop its scratch data,
+    // otherwise abandoned partials accumulate forever with nothing left in the
+    // queue pointing at them. A running task is still writing (and re-saving
+    // its sidecar every 400ms), so its cleanup waits until it has stopped.
+    if (item.task) {
+      item._discardOnSettle = item.status !== 'completed';
+      item.task.cancel();
+    } else if (item.status !== 'completed') {
+      this._discardPartial(item);
+    }
     const queueId = item.queueId || MAIN_QUEUE_ID;
     this.items.delete(id);
     this._deleteItem(id);
     this.emit('removed', { id });
     this.emit('queues-changed', this.listQueues());
     this._pump(queueId);
+  }
+
+  /**
+   * Throw away everything an unfinished download left behind: its temp-folder
+   * workspace, and — when it was assembled in place — the sidecar, the stream
+   * parts folder, and the partial file itself. The partial file is only
+   * removed when its sidecar proves it IS one of our partials, never a file
+   * the user already had.
+   */
+  _discardPartial(item) {
+    if (!item || !item.destPath) return;
+    discardWorkspace({ destPath: item.destPath, tempDir: this._tempDir() });
+    const sidecar = `${item.destPath}.ddl.json`;
+    try {
+      if (fs.existsSync(sidecar)) {
+        if (item.status !== 'completed' && fs.existsSync(item.destPath)) fs.unlinkSync(item.destPath);
+        fs.unlinkSync(sidecar);
+      }
+      if (fs.existsSync(`${sidecar}.tmp`)) fs.unlinkSync(`${sidecar}.tmp`);
+    } catch (err) {
+      console.warn(`[Manager] Could not remove partial download ${item.destPath}:`, err.message);
+    }
+    for (const dir of [`${item.destPath}.hls_parts`, `${item.destPath}.dash_parts`]) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch (err) {
+        /* best effort */
+      }
+    }
+  }
+
+  /**
+   * IDM "Redownload": start this entry over from zero with its original
+   * headers, kind, quality and destination. Re-adding the bare URL (what the
+   * menu used to do) lost the captured cookies, so a browser-captured download
+   * came back 403, and tripped the duplicate prompt against itself.
+   */
+  redownload(id) {
+    const item = this.items.get(id);
+    if (!item) return;
+    if (item.task) {
+      item._pendingRedownload = true;
+      item.task.cancel();
+      return;
+    }
+    // The previous copy stays where it is until the new one is verified; the
+    // publish step then replaces it, exactly like a first download would.
+    const keep = item.status === 'completed';
+    if (!keep) this._discardPartial(item);
+    else {
+      discardWorkspace({ destPath: item.destPath, tempDir: this._tempDir() });
+      try {
+        if (item.destPath && fs.existsSync(`${item.destPath}.ddl.json`)) fs.unlinkSync(`${item.destPath}.ddl.json`);
+      } catch (err) {
+        /* best effort */
+      }
+    }
+    item.status = 'queued';
+    item.error = null;
+    item.progress = null;
+    item.startedAt = null;
+    item.completedAt = null;
+    this._persistItem(item);
+    this.emit('updated', this._publicView(item));
+    this._pump(item.queueId || MAIN_QUEUE_ID);
   }
 
   list() {
@@ -652,6 +778,9 @@ class Manager extends EventEmitter {
       url: item.url,
       destPath: item.destPath,
       filename: item.filename,
+      // What the list shows before the server has named the file: the name
+      // the user/extension asked for, else the URL's last path segment.
+      displayName: item.filename || item.suggestedFilename || nameFromUrl(item.url) || item.url,
       status: item.status,
       size: item.size ?? (item.progress ? item.progress.size : null),
       progress: item.progress,
@@ -711,25 +840,18 @@ class Manager extends EventEmitter {
   /**
    * IDM "Refresh download address": swap in a fresh URL (e.g. an expired CDN
    * link) while preserving byte progress, then resume from the same offset.
-   * Patches the on-disk .ddl.json so the resumed task uses the new URL.
+   *
+   * The resumed task treats the URL it is given as authoritative over the one
+   * recorded in its .ddl.json sidecar (see DownloadTask._loadMeta), so nothing
+   * on disk needs patching — which matters, because with a temp folder the
+   * sidecar isn't next to destPath at all, and the old patch-in-place silently
+   * missed it and kept resuming from the expired link.
    */
   refreshUrl(id, newUrl) {
     const item = this.items.get(id);
-    if (!item || !newUrl) return;
-    item.url = newUrl;
-    if (item.destPath) {
-      const metaPath = `${item.destPath}.ddl.json`;
-      try {
-        if (fs.existsSync(metaPath)) {
-          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-          meta.url = newUrl;
-          meta.finalUrl = newUrl;
-          fs.writeFileSync(metaPath, JSON.stringify(meta));
-        }
-      } catch (err) {
-        console.error('Failed to patch meta on refreshUrl:', err);
-      }
-    }
+    const url = typeof newUrl === 'string' ? newUrl.trim() : '';
+    if (!item || !/^(https?|ftp):\/\//i.test(url)) return;
+    item.url = url;
     this._persistItem(item);
     if (item.task) {
       // Mid-flight: pause now and resume once the task has fully settled to
@@ -759,7 +881,7 @@ class Manager extends EventEmitter {
     }
 
     const queue = this.queues.get(queueId);
-    if (!queue) return;
+    if (!queue || this._shuttingDown) return;
     // A queue-specific limit wins; 0 means "follow the global setting".
     const max = queue.maxConcurrent > 0 ? queue.maxConcurrent : this._maxConcurrent();
     const ordered = this._itemsInQueue(queueId);
@@ -824,17 +946,64 @@ class Manager extends EventEmitter {
     }
   }
 
+  /**
+   * Turn a candidate destination into one nothing else is using, and claim it
+   * for `item` immediately.
+   *
+   * Two downloads that both resolve to "video.mp4" in the same folder used to
+   * share one temp workspace and one sidecar while running — each clobbering
+   * the other's bytes and progress — and whichever finished second deleted the
+   * first one's finished file to publish its own. Now the second becomes
+   * "video (2).mp4", the way a browser names a repeated download. A file that
+   * already exists on disk is never overwritten by a NEW download either.
+   *
+   * Only called for a download's first run; resumes keep the path they had.
+   */
+  _reserveDestPath(item, candidate) {
+    const taken = new Set();
+    for (const other of this.items.values()) {
+      if (other !== item && other.destPath) taken.add(samePathKey(other.destPath));
+    }
+    const dir = path.dirname(candidate);
+    const base = path.basename(candidate);
+    for (let n = 1; n < 10000; n++) {
+      const p = path.join(dir, numberedVariant(base, n));
+      if (taken.has(samePathKey(p))) continue;
+      if (fs.existsSync(p) || fs.existsSync(`${p}.ddl.json`)) continue;
+      item.destPath = p;
+      this._persistItem(item);
+      return p;
+    }
+    item.destPath = candidate;
+    return candidate;
+  }
+
   async _startTask(item) {
+    // A previous run that failed may still be unwinding (see `running` below).
+    // Starting over on top of it would put two tasks on one file and one
+    // sidecar. The wait is bounded by the HTTP response timeout.
+    if (item._taskRun) {
+      await Promise.race([item._taskRun, sleep(35000)]);
+      item._taskRun = null;
+    }
+
     let TaskClass;
     if (item.kind === 'hls') TaskClass = HlsDownloadTask;
     else if (item.kind === 'dash') TaskClass = DashDownloadTask;
     else TaskClass = DownloadTask;
 
+    const streamDest = () =>
+      item.destPath ||
+      this._reserveDestPath(
+        item,
+        path.join(item.destDir, sanitizeFilename(streamOutputName(item.suggestedFilename || item.id), 'video.mp4'))
+      );
+
     const taskOpts =
       item.kind === 'hls'
         ? {
             playlistUrl: item.url,
-            destPath: item.destPath || path.join(item.destDir, `${item.suggestedFilename || item.id}.mp4`),
+            destPath: streamDest(),
             headers: item.headers,
             variantIndex: item.variantIndex,
             rateLimiter: this.rateLimiter,
@@ -843,7 +1012,7 @@ class Manager extends EventEmitter {
         : item.kind === 'dash'
         ? {
             mpdUrl: item.url,
-            destPath: item.destPath || path.join(item.destDir, `${item.suggestedFilename || item.id}.mp4`),
+            destPath: streamDest(),
             headers: item.headers,
             variantIndex: item.variantIndex,
             rateLimiter: this.rateLimiter,
@@ -866,10 +1035,13 @@ class Manager extends EventEmitter {
               suggestedFilename: item.suggestedFilename,
               rateLimiter: this.rateLimiter,
               tempDir: this._tempDir(),
+              reserveDestPath: (candidate) => this._reserveDestPath(item, candidate),
             };
 
     const task = new TaskClass(taskOpts);
     item.task = task;
+    let settle;
+    item._settled = new Promise((r) => (settle = r));
 
     task.on('start', (info) => {
       item.filename = info.filename || path.basename(task.destPath || '');
@@ -890,13 +1062,23 @@ class Manager extends EventEmitter {
     task.on('variant-selected', (v) => this.emit('variant-selected', { id: item.id, variant: v }));
     task.on('segment-error', (e) => this.emit('segment-error', { id: item.id, ...e }));
 
+    // Resolving on the first terminal event is not the same as the task having
+    // stopped: when a segment gives up, 'error' fires while the other
+    // connections are still finishing their current chunk and start() has yet
+    // to write its final sidecar. `running` is start() itself, kept so that
+    // anything touching this download's files next waits for it to finish.
+    let running = null;
     try {
       await new Promise((resolve, reject) => {
-        task.once('complete', resolve);
+        task.once('complete', (info) => {
+          if (info && Number.isFinite(info.size) && info.size > 0) item.size = info.size;
+          resolve();
+        });
         task.once('cancelled', resolve);
         task.once('paused', resolve);
         task.once('error', reject);
-        task.start().catch(reject);
+        running = task.start();
+        running.catch(reject);
       });
 
       if (task.cancelled) {
@@ -906,15 +1088,30 @@ class Manager extends EventEmitter {
       } else {
         item.status = 'completed';
         item.completedAt = Date.now();
+        // An HLS/DASH row showed an extrapolated size while it ran; the
+        // real one is known now.
+        if (item.progress) item.progress = { ...item.progress, percent: 100, size: item.size ?? item.progress.size };
       }
     } catch (err) {
       item.status = 'error';
-      item.error = err.message;
+      item.error = err && err.message ? err.message : String(err);
     }
 
     item.task = null;
-    this._persistItem(item);
-    this.emit('updated', this._publicView(item));
+    item._taskRun = running ? running.catch(() => {}) : null;
+
+    if (item._discardOnSettle) {
+      item._discardOnSettle = false;
+      await Promise.race([item._taskRun, sleep(5000)]);
+      this._discardPartial(item);
+    }
+
+    // A removed item is gone from the list; don't resurrect its row.
+    if (this.items.get(item.id) === item) {
+      this._persistItem(item);
+      this.emit('updated', this._publicView(item));
+    }
+    settle();
 
     // A refreshUrl() that landed while this task was running deferred its resume
     // until the task settled — honour it now that status is final.
@@ -922,9 +1119,86 @@ class Manager extends EventEmitter {
       item._pendingResume = false;
       this.resume(item.id);
     }
+    if (item._pendingRedownload) {
+      item._pendingRedownload = false;
+      this.redownload(item.id);
+    }
+  }
+
+  /**
+   * Stop cleanly before the app exits: pause every transfer so each one
+   * flushes its bytes and writes a final sidecar, wait (bounded) for them to
+   * settle, then close the database. Killing the process mid-write instead
+   * left the last ~400ms of every download to be fetched again, and on a
+   * crash-prone disk, sidecars pointing past what was really written.
+   */
+  async shutdown({ timeoutMs = 4000 } = {}) {
+    if (this._shuttingDown) return;
+    this._shuttingDown = true;
+    const active = Array.from(this.items.values()).filter((i) => i.task);
+    for (const item of active) {
+      try {
+        item.task.pause();
+      } catch (e) {
+        /* already stopping */
+      }
+    }
+    const settled = active.map((i) => i._settled || Promise.resolve());
+    await Promise.race([Promise.all(settled), sleep(timeoutMs)]);
+    try {
+      this.db.close();
+    } catch (e) {
+      /* already closed */
+    }
+  }
+
+  /**
+   * What the Add URL dialog needs before the user commits: the file's name,
+   * size, type, where it would be saved, and whether it can be resumed. Never
+   * throws for an ordinary network problem — the dialog shows the reason and
+   * still lets the user add the URL.
+   */
+  async probeUrl(url, headers = {}) {
+    const target = typeof url === 'string' ? url.trim() : '';
+    if (!/^(https?|ftp):\/\//i.test(target)) return { ok: false, error: 'Not an http(s) or ftp URL' };
+    const kindFromUrl = /\.m3u8?(\?|#|$)/i.test(target) ? 'hls' : /\.mpd(\?|#|$)/i.test(target) ? 'dash' : 'file';
+    const destDirs = this.config ? this.config.get('destDirs') || {} : {};
+    const describe = (kind, filename, extra) => {
+      const category = getCategoryForUrl(target, kind, filename);
+      return {
+        ok: true,
+        kind,
+        filename,
+        category,
+        destDir: destDirs[category] || destDirs.General || this.defaultDestDir || null,
+        ...extra,
+      };
+    };
+    if (kindFromUrl !== 'file') {
+      return describe(kindFromUrl, sanitizeFilename(streamOutputName(nameFromUrl(target) || 'video'), 'video.mp4'), {
+        size: null,
+        resumable: true,
+      });
+    }
+    try {
+      const siteLogins = this.config ? this.config.get('siteLogins') : null;
+      const info = await probe(target, applySiteLogin(siteLogins, target, headers || {}));
+      const ct = String(info.contentType || '').toLowerCase();
+      const kind = /mpegurl/.test(ct) ? 'hls' : /dash\+xml/.test(ct) ? 'dash' : 'file';
+      const name = kind === 'file' ? info.filename : streamOutputName(info.filename);
+      return describe(kind, sanitizeFilename(name, 'download.bin'), {
+        size: info.size,
+        resumable: Boolean(info.acceptRanges),
+        contentType: info.contentType || null,
+        finalUrl: info.finalUrl,
+      });
+    } catch (err) {
+      return { ...describe('file', sanitizeFilename(nameFromUrl(target), 'download.bin'), { size: null }), ok: false, error: err.message };
+    }
   }
 
   _persistItem(item) {
+    if (this._shuttingDown && !this.db.open) return;
     try {
       this.insertStmt.run(
         item.id,
@@ -945,7 +1219,10 @@ class Manager extends EventEmitter {
             : item.progress || (item.size != null ? { size: item.size } : null)
         ),
         item.queueId || MAIN_QUEUE_ID,
-        item.position || 0
+        item.position || 0,
+        item.suggestedFilename || null,
+        item.startedAt ?? null,
+        item.completedAt ?? null
       );
     } catch (err) {
       console.error('Failed to persist item to db:', err);
@@ -983,6 +1260,9 @@ class Manager extends EventEmitter {
           queueId: row.queueId || MAIN_QUEUE_ID,
           position: row.position || 0,
           progress: JSON.parse(row.progress || 'null'),
+          suggestedFilename: row.suggestedFilename || null,
+          startedAt: row.startedAt ?? null,
+          completedAt: row.completedAt ?? null,
           task: null,
         };
         item.size = item.progress && item.progress.size != null ? item.progress.size : null;
